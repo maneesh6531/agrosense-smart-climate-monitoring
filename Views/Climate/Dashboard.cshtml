@@ -52,7 +52,7 @@
  <div class="col-lg-8"><div class="content-card h-100"><div class="section-heading"><div><h5>Next 24 hours</h5><p class="muted">Temperature trend</p></div><span class="tag">HOURLY</span></div><canvas id="dashboardChart" height="105"></canvas></div></div>
  <div class="col-lg-4"><div class="content-card h-100"><div class="section-heading"><div><h5>Farm advisory</h5><p class="muted">Weather-based guidance</p></div><span>🌿</span></div><p>@Model.Recommendation</p><a asp-action="Recommendations" asp-route-latitude="@latStr" asp-route-longitude="@lonStr" asp-route-location="@Model.Location" class="text-green fw-semibold">View recommendations →</a></div></div>
 </div>
-<div class="small muted mt-3">Source: Open-Meteo. Weather values describe the selected coordinates and are not direct measurements from farm sensors.</div>
+<div class="small muted mt-3">Source: WeatherAPI.com. Weather values describe the selected coordinates and are not direct measurements from farm sensors.</div>
 } else if (string.IsNullOrEmpty(Model.Error)) {
 <div class="content-card text-center py-5">
   <div class="fs-1 mb-2">📡</div>

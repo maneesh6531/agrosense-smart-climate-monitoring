@@ -28,13 +28,32 @@ public class ClimateController : Controller
                 Latitude = loc.Latitude,
                 Longitude = loc.Longitude,
                 Weather = data,
-                WeatherDescription = WeatherService.DescribeWeather(data.Current?.WeatherCode ?? -1),
-                Recommendation = WeatherService.MakeRecommendation(data.Current)
+                WeatherDescription = WeatherService.DescribeWeather(data.Current?.WeatherCode ?? -1, data.Current?.ConditionText),
+                Recommendation = WeatherService.MakeRecommendation(data.Current),
+                IsStale = data.IsStale,
+                LastUpdated = data.LastUpdated ?? data.FetchedAt
             };
         }
         catch (WeatherRateLimitException ex)
         {
-            _logger.LogWarning("Rate limit reached for {Location}: {Message}", loc.Location, ex.Message);
+            var stale = _weather.TryGetStaleFallback(WeatherService.GetWeatherCacheKey(loc.Latitude, loc.Longitude));
+            if (stale != null)
+            {
+                _logger.LogInformation("Rate-limit encountered; serving stale cached data for {Location}.", loc.Location);
+                return new ClimatePageViewModel
+                {
+                    Location = loc.Location,
+                    Latitude = loc.Latitude,
+                    Longitude = loc.Longitude,
+                    Weather = stale,
+                    WeatherDescription = WeatherService.DescribeWeather(stale.Current?.WeatherCode ?? -1),
+                    Recommendation = WeatherService.MakeRecommendation(stale.Current),
+                    IsStale = true,
+                    LastUpdated = stale.LastUpdated ?? stale.FetchedAt
+                };
+            }
+
+            _logger.LogWarning("Rate limit reached for {Location} without stale fallback: {Message}", loc.Location, ex.Message);
             return new ClimatePageViewModel
             {
                 Location = loc.Location,
@@ -45,6 +64,23 @@ public class ClimateController : Controller
         }
         catch (WeatherServiceException ex)
         {
+            var stale = _weather.TryGetStaleFallback(WeatherService.GetWeatherCacheKey(loc.Latitude, loc.Longitude));
+            if (stale != null)
+            {
+                _logger.LogInformation("Weather service exception; serving stale cached data for {Location}.", loc.Location);
+                return new ClimatePageViewModel
+                {
+                    Location = loc.Location,
+                    Latitude = loc.Latitude,
+                    Longitude = loc.Longitude,
+                    Weather = stale,
+                    WeatherDescription = WeatherService.DescribeWeather(stale.Current?.WeatherCode ?? -1),
+                    Recommendation = WeatherService.MakeRecommendation(stale.Current),
+                    IsStale = true,
+                    LastUpdated = stale.LastUpdated ?? stale.FetchedAt
+                };
+            }
+
             _logger.LogWarning("Weather service error for {Location}: {Message}", loc.Location, ex.Message);
             return new ClimatePageViewModel
             {

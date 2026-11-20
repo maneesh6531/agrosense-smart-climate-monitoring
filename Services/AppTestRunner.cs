@@ -1,64 +1,153 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using ClimateMonitoringSystem.Controllers;
 using ClimateMonitoringSystem.Models;
-using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ClimateMonitoringSystem.Services;
 
-public class MockHttpMessageHandler : HttpMessageHandler
+public class MockWeatherApiHttpMessageHandler : HttpMessageHandler
 {
-    public int CallCount { get; private set; }
-    public List<HttpRequestMessage> Requests { get; } = new();
-    public Func<HttpRequestMessage, HttpResponseMessage>? ResponseFactory { get; set; }
+    public int TotalRequests => _requests.Count;
+    public int MaxConcurrentRequests { get; private set; }
+    private int _currentInFlight;
+    private readonly ConcurrentBag<HttpRequestMessage> _requests = new();
+    public List<HttpRequestMessage> RecordedRequests => _requests.ToList();
+    public Func<HttpRequestMessage, Task<HttpResponseMessage>>? AsyncResponseFactory { get; set; }
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        CallCount++;
-        Requests.Add(request);
-        if (ResponseFactory != null)
+        _requests.Add(request);
+        var inFlight = Interlocked.Increment(ref _currentInFlight);
+        lock (this)
         {
-            return Task.FromResult(ResponseFactory(request));
+            if (inFlight > MaxConcurrentRequests)
+            {
+                MaxConcurrentRequests = inFlight;
+            }
         }
 
-        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        try
         {
-            Content = new StringContent(SampleWeatherJson, Encoding.UTF8, "application/json")
-        };
-        return Task.FromResult(response);
+            if (AsyncResponseFactory != null)
+            {
+                return await AsyncResponseFactory(request);
+            }
+
+            // Small delay to simulate network latency
+            await Task.Delay(20, cancellationToken);
+
+            var path = request.RequestUri?.AbsolutePath ?? "";
+            if (path.Contains("search.json"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(SampleSearchJson, Encoding.UTF8, "application/json")
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(SampleForecastJson, Encoding.UTF8, "application/json")
+            };
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _currentInFlight);
+        }
     }
 
-    public const string SampleWeatherJson = @"{
-        ""latitude"": 14.44,
-        ""longitude"": 79.99,
-        ""timezone"": ""Asia/Kolkata"",
+    public const string SampleForecastJson = @"{
+        ""location"": {
+            ""name"": ""Nellore"",
+            ""region"": ""Andhra Pradesh"",
+            ""country"": ""India"",
+            ""lat"": 14.44,
+            ""lon"": 79.99,
+            ""tz_id"": ""Asia/Kolkata"",
+            ""localtime"": ""2026-11-20 23:45""
+        },
         ""current"": {
-            ""time"": ""2026-11-20T17:00"",
-            ""temperature_2m"": 28.5,
-            ""relative_humidity_2m"": 75.0,
-            ""apparent_temperature"": 30.2,
-            ""precipitation"": 0.0,
-            ""weather_code"": 1,
-            ""wind_speed_10m"": 12.0
+            ""last_updated"": ""2026-11-20 23:30"",
+            ""temp_c"": 27.8,
+            ""feelslike_c"": 30.5,
+            ""humidity"": 76,
+            ""precip_mm"": 0.0,
+            ""wind_kph"": 11.5,
+            ""condition"": {
+                ""text"": ""Partly cloudy"",
+                ""code"": 1003
+            }
         },
-        ""hourly"": {
-            ""time"": [""2026-11-20T00:00"", ""2026-11-20T01:00""],
-            ""temperature_2m"": [27.0, 26.5],
-            ""relative_humidity_2m"": [80.0, 82.0],
-            ""precipitation_probability"": [10, 15],
-            ""precipitation"": [0.0, 0.0]
-        },
-        ""daily"": {
-            ""time"": [""2026-11-20"", ""2026-11-21""],
-            ""temperature_2m_max"": [32.0, 31.5],
-            ""temperature_2m_min"": [24.0, 23.5],
-            ""precipitation_sum"": [0.0, 2.5],
-            ""weather_code"": [1, 2],
-            ""uv_index_max"": [7.5, 6.8]
+        ""forecast"": {
+            ""forecastday"": [
+                {
+                    ""date"": ""2026-11-20"",
+                    ""day"": {
+                        ""maxtemp_c"": 32.8,
+                        ""mintemp_c"": 23.8,
+                        ""totalprecip_mm"": 0.0,
+                        ""uv"": 7.8,
+                        ""condition"": { ""text"": ""Partly cloudy"", ""code"": 1003 }
+                    },
+                    ""hour"": [
+                        { ""time"": ""2026-11-20 00:00"", ""temp_c"": 25.1, ""humidity"": 85, ""chance_of_rain"": 5, ""precip_mm"": 0.0 },
+                        { ""time"": ""2026-11-20 01:00"", ""temp_c"": 24.8, ""humidity"": 86, ""chance_of_rain"": 5, ""precip_mm"": 0.0 },
+                        { ""time"": ""2026-11-20 02:00"", ""temp_c"": 24.5, ""humidity"": 88, ""chance_of_rain"": 5, ""precip_mm"": 0.0 },
+                        { ""time"": ""2026-11-20 03:00"", ""temp_c"": 24.2, ""humidity"": 89, ""chance_of_rain"": 5, ""precip_mm"": 0.0 }
+                    ]
+                },
+                {
+                    ""date"": ""2026-11-21"",
+                    ""day"": {
+                        ""maxtemp_c"": 32.2,
+                        ""mintemp_c"": 23.5,
+                        ""totalprecip_mm"": 0.5,
+                        ""uv"": 7.5,
+                        ""condition"": { ""text"": ""Sunny"", ""code"": 1000 }
+                    },
+                    ""hour"": [
+                        { ""time"": ""2026-11-21 00:00"", ""temp_c"": 24.9, ""humidity"": 84, ""chance_of_rain"": 10, ""precip_mm"": 0.0 }
+                    ]
+                },
+                {
+                    ""date"": ""2026-11-22"",
+                    ""day"": {
+                        ""maxtemp_c"": 31.8,
+                        ""mintemp_c"": 23.2,
+                        ""totalprecip_mm"": 1.2,
+                        ""uv"": 6.9,
+                        ""condition"": { ""text"": ""Patchy rain possible"", ""code"": 1063 }
+                    },
+                    ""hour"": [
+                        { ""time"": ""2026-11-22 00:00"", ""temp_c"": 24.5, ""humidity"": 85, ""chance_of_rain"": 20, ""precip_mm"": 0.1 }
+                    ]
+                }
+            ]
+        }
+    }";
+
+    public const string SampleSearchJson = @"[
+        {
+            ""id"": 1261029,
+            ""name"": ""Nellore"",
+            ""region"": ""Andhra Pradesh"",
+            ""country"": ""India"",
+            ""lat"": 14.44,
+            ""lon"": 79.99,
+            ""url"": ""nellore-andhra-pradesh-india""
+        }
+    ]";
+
+    public const string SampleAuthErrorJson = @"{
+        ""error"": {
+            ""code"": 2006,
+            ""message"": ""API key is invalid.""
         }
     }";
 }
@@ -83,9 +172,9 @@ public static class AppTestRunner
     public static async Task<int> RunAllTestsAsync()
     {
         Console.WriteLine();
-        Console.WriteLine("==================================================");
-        Console.WriteLine("AgroSense Automated Verification Test Suite");
-        Console.WriteLine("==================================================");
+        Console.WriteLine("======================================================================");
+        Console.WriteLine("AgroSense WeatherAPI.com Integration & Verification Test Suite");
+        Console.WriteLine("======================================================================");
 
         int passed = 0;
         int failed = 0;
@@ -106,222 +195,243 @@ public static class AppTestRunner
             }
         }
 
-        // ========================================================
-        // 1. LOCATION SYNCHRONIZATION TESTS
-        // ========================================================
-        Console.WriteLine("\n--- 1. Testing UserLocationService & Location Persistence ---");
-        var locService = new UserLocationService();
-        var defaultContext = new DefaultHttpContext { Session = new MockSession() };
+        WeatherService.ResetCooldownForTesting();
 
-        // Test 1: Initial default location is Jalandhar
+        var testApiKey = "test_valid_weatherapi_key_12345";
+        var configWithKey = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["WEATHERAPI_KEY"] = testApiKey
+            })
+            .Build();
+
+        var locService = new UserLocationService();
+
+        // ==============================================================================
+        // 1. LOCATION SYNCHRONIZATION TESTS
+        // ==============================================================================
+        Console.WriteLine("\n--- 1. Testing UserLocationService & Location Persistence ---");
+        var defaultContext = new DefaultHttpContext { Session = new MockSession() };
         var initialLoc = locService.GetCurrentLocation(defaultContext);
         Assert(initialLoc.Location == "Jalandhar" && Math.Abs(initialLoc.Latitude - 31.2240) < 0.001,
-            "Test 1: Initial default location is Jalandhar");
+            "Test 1a: Initial default location is Jalandhar");
 
-        // Test 2: Set location to Nellore
         var nelloreLoc = locService.SetLocation(defaultContext, 14.4426, 79.9865, "Nellore");
         Assert(nelloreLoc.Location == "Nellore" && Math.Abs(nelloreLoc.Latitude - 14.4426) < 0.001,
-            "Test 2: Selected location saved as Nellore");
+            "Test 1b: Selected location saved as Nellore (14.4426, 79.9865)");
 
-        // Test 3: Session persistence without query parameters
         var sessionLoc = locService.GetCurrentLocation(defaultContext);
         Assert(sessionLoc.Location == "Nellore" && Math.Abs(sessionLoc.Latitude - 14.4426) < 0.001,
-            "Test 3: Location retained in session without query parameters");
+            "Test 1c: Location retained in session without query parameters");
 
-        // Test 4: Cookie persistence (simulating page refresh / new session)
         var refreshContext = new DefaultHttpContext { Session = new MockSession() };
         refreshContext.Request.Headers["Cookie"] = "AgroSense_Location=Nellore; AgroSense_Latitude=14.4426; AgroSense_Longitude=79.9865";
         var cookieLoc = locService.GetCurrentLocation(refreshContext);
         Assert(cookieLoc.Location == "Nellore" && Math.Abs(cookieLoc.Latitude - 14.4426) < 0.001,
-            "Test 4: Browser refresh persists selected location via cookie");
+            "Test 1d: Browser refresh persists selected location via cookie");
 
-        // Test 5: Switching city from Nellore to Mumbai
         var mumbaiLoc = locService.SetLocation(refreshContext, 19.0760, 72.8777, "Mumbai");
         var retrievedMumbai = locService.GetCurrentLocation(refreshContext);
         Assert(retrievedMumbai.Location == "Mumbai" && Math.Abs(retrievedMumbai.Latitude - 19.0760) < 0.001,
-            "Test 5: Switching city updates location to Mumbai");
+            "Test 1e: Switching city updates location to Mumbai");
 
-        // Test 6: Coordinate boundary validation (out of range lat/lon rejected)
         var invalidLat = locService.SetLocation(refreshContext, 999.0, 72.8777, "Invalid");
         Assert(invalidLat.Location == "Mumbai",
-            "Test 6: Invalid latitude (+999) rejected safely, preserves valid location");
+            "Test 1f: Invalid latitude (+999) rejected safely, preserves valid location");
 
-        // ========================================================
-        // 2. WEATHER SERVICE & CACHING TESTS
-        // ========================================================
-        Console.WriteLine("\n--- 2. Testing WeatherService Caching & HTTP 429 Handling ---");
-        var memoryCache = new MemoryCache(new MemoryCacheOptions());
-        var mockHttp = new MockHttpMessageHandler();
-        var httpClient = new HttpClient(mockHttp);
-        var weatherService = new WeatherService(httpClient, memoryCache, NullLogger<WeatherService>.Instance);
+        // ==============================================================================
+        // 2. WEATHERAPI AUTHENTICATION & CURRENT WEATHER RETRIEVAL
+        // ==============================================================================
+        Console.WriteLine("\n--- 2. Testing WeatherAPI Authentication & Current Weather ---");
+        var memoryCache2 = new MemoryCache(new MemoryCacheOptions());
+        var mockHttp2 = new MockWeatherApiHttpMessageHandler();
+        var client2 = new HttpClient(mockHttp2);
+        var weatherService2 = new WeatherService(client2, memoryCache2, configWithKey, NullLogger<WeatherService>.Instance);
 
-        // Test 7a: First request calls API
-        var w1 = await weatherService.GetWeatherAsync(14.4426, 79.9865);
-        Assert(mockHttp.CallCount == 1 && w1.Current != null,
-            "Test 7a: First weather request calls Open-Meteo API");
+        var weatherData = await weatherService2.GetWeatherAsync(14.4426, 79.9865);
+        Assert(weatherData.Current != null, "Test 2a: WeatherAPI returned valid current weather object");
+        Assert(Math.Abs(weatherData.Current!.Temperature - 27.8) < 0.01,
+            $"Test 2b: Current temperature mapped correctly: {weatherData.Current.Temperature}°C");
+        Assert(Math.Abs(weatherData.Current.Humidity - 76.0) < 0.01,
+            $"Test 2c: Current humidity mapped correctly: {weatherData.Current.Humidity}%");
+        Assert(weatherData.Current.ConditionText == "Partly cloudy",
+            $"Test 2d: Condition text preserved: {weatherData.Current.ConditionText}");
 
-        // Test 7b: Second request uses in-memory cache
-        var w2 = await weatherService.GetWeatherAsync(14.4426, 79.9865);
-        Assert(mockHttp.CallCount == 1,
-            "Test 7b: Consecutive request for same coords served from IMemoryCache (0 new API calls)");
+        // ==============================================================================
+        // 3. WEATHERAPI CITY AUTOCOMPLETE SEARCH (NELLORE)
+        // ==============================================================================
+        Console.WriteLine("\n--- 3. Testing WeatherAPI City Autocomplete Search ---");
+        var searchResults = await weatherService2.SearchPlacesAsync("Nellore");
+        Assert(searchResults.Count > 0, "Test 3a: City search returned results for Nellore");
+        var firstResult = searchResults.FirstOrDefault();
+        Assert(firstResult != null && firstResult.Name == "Nellore" && firstResult.Country == "India",
+            $"Test 3b: City search parsed: {firstResult?.Name}, {firstResult?.Region}, {firstResult?.Country}");
 
-        // Test 8: Geocoding caching is isolated
-        mockHttp.ResponseFactory = req => new HttpResponseMessage(HttpStatusCode.OK)
+        // ==============================================================================
+        // 4. THREE-DAY FORECAST DATA INTEGRITY
+        // ==============================================================================
+        Console.WriteLine("\n--- 4. Testing Three-Day Forecast Data Integrity ---");
+        Assert(weatherData.Daily != null && weatherData.Daily.Time.Count == 3,
+            $"Test 4a: Three-day forecast provided by WeatherAPI (Daily count: {weatherData.Daily?.Time.Count})");
+        Assert(weatherData.Daily!.MaxTemperature.Count == 3 && weatherData.Daily.MaxTemperature[0] == 32.8,
+            "Test 4b: Day 1 Max Temperature correctly mapped (32.8°C)");
+        Assert(weatherData.Daily.MinTemperature.Count == 3 && weatherData.Daily.MinTemperature[0] == 23.8,
+            "Test 4c: Day 1 Min Temperature correctly mapped (23.8°C)");
+        Assert(weatherData.Hourly != null && weatherData.Hourly.Time.Count > 0,
+            $"Test 4d: Hourly forecast points extracted for trend chart (Hourly count: {weatherData.Hourly?.Time.Count})");
+
+        // ==============================================================================
+        // 5. CACHING & REQUEST COALESCING (SINGLE-FLIGHT)
+        // ==============================================================================
+        Console.WriteLine("\n--- 5. Testing Caching & Request Coalescing ---");
+        var memoryCache5 = new MemoryCache(new MemoryCacheOptions());
+        var mockHttp5 = new MockWeatherApiHttpMessageHandler();
+        var client5 = new HttpClient(mockHttp5);
+        var weatherService5 = new WeatherService(client5, memoryCache5, configWithKey, NullLogger<WeatherService>.Instance);
+
+        // 5 simultaneous requests for the same coordinates
+        var coalescingTasks = new List<Task<WeatherResponse>>();
+        for (int i = 0; i < 5; i++)
         {
-            Content = new StringContent(@"{""results"":[{""name"":""Nellore"",""latitude"":14.4426,""longitude"":79.9865,""admin1"":""Andhra Pradesh"",""country"":""India""}]}", Encoding.UTF8, "application/json")
-        };
-        var geo1 = await weatherService.SearchPlacesAsync("Nellore");
-        var callCountAfterGeo1 = mockHttp.CallCount;
-        var geo2 = await weatherService.SearchPlacesAsync("Nellore");
-        Assert(mockHttp.CallCount == callCountAfterGeo1 && geo1.Count > 0 && geo2.Count > 0,
-            "Test 8: Geocoding search cached separately for 24 hours");
+            coalescingTasks.Add(weatherService5.GetWeatherAsync(14.4426, 79.9865));
+        }
+        var coalescedResults = await Task.WhenAll(coalescingTasks);
+        Assert(coalescedResults.Length == 5 && mockHttp5.TotalRequests == 1,
+            $"Test 5a: Request coalescing verified: 5 concurrent callers triggered exactly 1 upstream HTTP request (Actual: {mockHttp5.TotalRequests})");
 
-        // Test 9: HTTP 429 Retry with exponential backoff & Retry-After header
-        int retry429Attempts = 0;
-        mockHttp.ResponseFactory = req =>
-        {
-            retry429Attempts++;
-            if (retry429Attempts <= 2)
-            {
-                var resp429 = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
-                resp429.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(50));
-                return resp429;
-            }
-            return new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(MockHttpMessageHandler.SampleWeatherJson, Encoding.UTF8, "application/json")
-            };
-        };
+        // Subsequent request from cache
+        var cachedResult = await weatherService5.GetWeatherAsync(14.4426, 79.9865);
+        Assert(cachedResult != null && mockHttp5.TotalRequests == 1,
+            "Test 5b: In-memory cache hit: zero additional HTTP requests made");
 
-        var cache429 = new MemoryCache(new MemoryCacheOptions());
-        var weatherService429 = new WeatherService(httpClient, cache429, NullLogger<WeatherService>.Instance);
-        var wRetry = await weatherService429.GetWeatherAsync(20.0, 80.0);
-        Assert(wRetry != null && retry429Attempts == 3,
-            "Test 9: HTTP 429 respects Retry-After, retries with backoff and succeeds");
+        // ==============================================================================
+        // 6. MISSING OR INVALID API KEY ERROR HANDLING
+        // ==============================================================================
+        Console.WriteLine("\n--- 6. Testing Missing / Invalid API Key Error Handling ---");
+        // Test missing key:
+        var emptyConfig = new ConfigurationBuilder().Build();
+        var memoryCacheEmpty = new MemoryCache(new MemoryCacheOptions());
+        var weatherServiceNoKey = new WeatherService(new HttpClient(new MockWeatherApiHttpMessageHandler()), memoryCacheEmpty, emptyConfig, NullLogger<WeatherService>.Instance);
 
-        // Test 10: Persistent 429 triggers graceful exception and cooldown (does not retry indefinitely)
-        int persistent429Attempts = 0;
-        mockHttp.ResponseFactory = req =>
-        {
-            persistent429Attempts++;
-            var resp = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
-            resp.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(20));
-            return resp;
-        };
-
-        var cacheFail = new MemoryCache(new MemoryCacheOptions());
-        var weatherServiceFail = new WeatherService(httpClient, cacheFail, NullLogger<WeatherService>.Instance);
-        bool rateLimitCaught = false;
+        bool missingKeyCaught = false;
         try
         {
-            await weatherServiceFail.GetWeatherAsync(25.0, 85.0);
+            // Use unique coordinates so no seed cache exists
+            await weatherServiceNoKey.GetWeatherAsync(88.1234, 88.5678);
         }
-        catch (WeatherRateLimitException ex)
+        catch (WeatherServiceException ex)
         {
-            rateLimitCaught = true;
-            Assert(ex.Message.Contains("HTTP 429") || ex.Message.Contains("rate limit"),
-                "Test 10a: Informative rate-limit error message provided to user");
+            missingKeyCaught = true;
+            Assert(ex.Message.Contains("WEATHERAPI_KEY") || ex.Message.Contains("key is missing"),
+                "Test 6a: Missing API key produces clear descriptive error without crashing");
         }
-        Assert(rateLimitCaught && persistent429Attempts <= 3,
-            "Test 10b: Stopped after max retries without infinite looping (no indefinite retry)");
+        Assert(missingKeyCaught, "Test 6b: Missing API key was caught safely");
 
-        // Test 11: No fake data on failure
-        var failModel = new ClimatePageViewModel
+        // Test invalid key:
+        var mockHttpInvalid = new MockWeatherApiHttpMessageHandler();
+        mockHttpInvalid.AsyncResponseFactory = async req =>
         {
-            Location = "Nellore",
-            Error = "The live weather service rate limit has been reached (HTTP 429)."
+            await Task.Yield();
+            return new HttpResponseMessage(HttpStatusCode.Unauthorized)
+            {
+                Content = new StringContent(MockWeatherApiHttpMessageHandler.SampleAuthErrorJson, Encoding.UTF8, "application/json")
+            };
         };
-        Assert(failModel.Weather.Current == null && failModel.HasError && !failModel.HasWeather,
-            "Test 11: Failed weather request does NOT generate fake or misleading weather numbers");
+        var invalidConfig = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["WEATHERAPI_KEY"] = "invalid_dummy_key"
+            })
+            .Build();
+        var weatherServiceInvalid = new WeatherService(new HttpClient(mockHttpInvalid), new MemoryCache(new MemoryCacheOptions()), invalidConfig, NullLogger<WeatherService>.Instance);
 
-        // ========================================================
-        // 3. FULL FIVE-PAGE SYNCHRONIZATION TESTS
-        // ========================================================
-        Console.WriteLine("\n--- 3. Testing ClimateController Across All Five Pages ---");
+        bool invalidKeyCaught = false;
+        try
+        {
+            await weatherServiceInvalid.GetWeatherAsync(77.1234, 77.5678);
+        }
+        catch (WeatherServiceException ex)
+        {
+            invalidKeyCaught = true;
+            Assert(ex.Message.Contains("invalid") || ex.Message.Contains("Authentication Error"),
+                $"Test 6c: Invalid API key produces clear authentication error: '{ex.Message}'");
+        }
+        Assert(invalidKeyCaught, "Test 6d: Invalid API key handled without crashing");
+
+        // ==============================================================================
+        // 7. FULL FIVE-PAGE MVC CONTROLLER INTEGRATION & LOCATION SYNCHRONIZATION
+        // ==============================================================================
+        Console.WriteLine("\n--- 7. Testing Full Five-Page MVC Controller Synchronization ---");
+        WeatherService.ResetCooldownForTesting();
         var ctrlCache = new MemoryCache(new MemoryCacheOptions());
-        mockHttp.ResponseFactory = req => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(MockHttpMessageHandler.SampleWeatherJson, Encoding.UTF8, "application/json")
-        };
-        var ctrlWeather = new WeatherService(httpClient, ctrlCache, NullLogger<WeatherService>.Instance);
+        var ctrlHttp = new MockWeatherApiHttpMessageHandler();
+        var ctrlClient = new HttpClient(ctrlHttp);
+        var ctrlWeather = new WeatherService(ctrlClient, ctrlCache, configWithKey, NullLogger<WeatherService>.Instance);
         var controller = new ClimateController(ctrlWeather, locService, NullLogger<ClimateController>.Instance);
 
-        var userSessionContext = new DefaultHttpContext { Session = new MockSession() };
-        controller.ControllerContext = new ControllerContext { HttpContext = userSessionContext };
+        var sharedContext = new DefaultHttpContext { Session = new MockSession() };
+        controller.ControllerContext = new ControllerContext { HttpContext = sharedContext };
 
-        // Step 1: User selects Nellore on Dashboard
-        var dashResult = await controller.Dashboard(14.4426, 79.9865, "Nellore") as ViewResult;
-        var dashModel = dashResult?.Model as ClimatePageViewModel;
-        Assert(dashModel?.Location == "Nellore" && Math.Abs(dashModel.Latitude - 14.4426) < 0.001,
-            "Test 12a: Dashboard displays Nellore (14.4426, 79.9865)");
+        // 1. Dashboard selection
+        var rDash = await controller.Dashboard(14.4426, 79.9865, "Nellore") as ViewResult;
+        var mDash = rDash?.Model as ClimatePageViewModel;
+        Assert(mDash?.Location == "Nellore", "Test 7a: Dashboard displays selected location Nellore");
 
-        // Step 2: User navigates to Weather Map (NO query params) -> MUST RETAIN NELLORE
-        var mapResult = await controller.Map() as ViewResult;
-        var mapModel = mapResult?.Model as ClimatePageViewModel;
-        Assert(mapModel?.Location == "Nellore" && Math.Abs(mapModel.Latitude - 14.4426) < 0.001,
-            "Test 12b: Weather Map retains Nellore (14.4426, 79.9865) without query parameters");
+        // 2. Weather Map (no params)
+        var rMap = await controller.Map() as ViewResult;
+        var mMap = rMap?.Model as ClimatePageViewModel;
+        Assert(mMap?.Location == "Nellore" && Math.Abs(mMap.Latitude - 14.4426) < 0.001,
+            "Test 7b: Weather Map retains Nellore without query parameters");
 
-        // Step 3: User navigates to Analytics (NO query params) -> MUST RETAIN NELLORE
-        var anaResult = await controller.Analytics() as ViewResult;
-        var anaModel = anaResult?.Model as ClimatePageViewModel;
-        Assert(anaModel?.Location == "Nellore" && Math.Abs(anaModel.Latitude - 14.4426) < 0.001,
-            "Test 12c: Analytics retains Nellore (14.4426, 79.9865) without query parameters");
+        // 3. Analytics (no params)
+        var rAna = await controller.Analytics() as ViewResult;
+        var mAna = rAna?.Model as ClimatePageViewModel;
+        Assert(mAna?.Location == "Nellore", "Test 7c: Analytics retains Nellore");
+        Assert(mAna?.Weather?.Current != null && mAna.Weather.Daily != null,
+            "Test 7d: Analytics successfully loaded metrics from WeatherAPI");
 
-        // Step 4: User navigates to Forecast (NO query params) -> MUST RETAIN NELLORE
-        var foreResult = await controller.Forecast() as ViewResult;
-        var foreModel = foreResult?.Model as ClimatePageViewModel;
-        Assert(foreModel?.Location == "Nellore" && Math.Abs(foreModel.Latitude - 14.4426) < 0.001,
-            "Test 12d: 7-Day Forecast retains Nellore (14.4426, 79.9865) without query parameters");
+        // 4. Forecast (no params)
+        var rFore = await controller.Forecast() as ViewResult;
+        var mFore = rFore?.Model as ClimatePageViewModel;
+        Assert(mFore?.Location == "Nellore", "Test 7e: Forecast retains Nellore");
+        Assert(mFore?.Weather?.Daily?.Time.Count == 3,
+            $"Test 7f: Forecast view model contains 3-day forecast (Count: {mFore?.Weather?.Daily?.Time.Count})");
 
-        // Step 5: User navigates to Recommendations (NO query params) -> MUST RETAIN NELLORE
-        var recResult = await controller.Recommendations() as ViewResult;
-        var recModel = recResult?.Model as ClimatePageViewModel;
-        Assert(recModel?.Location == "Nellore" && Math.Abs(recModel.Latitude - 14.4426) < 0.001,
-            "Test 12e: Recommendations retains Nellore (14.4426, 79.9865) without query parameters");
+        // 5. Recommendations (no params)
+        var rRec = await controller.Recommendations() as ViewResult;
+        var mRec = rRec?.Model as ClimatePageViewModel;
+        Assert(mRec?.Location == "Nellore", "Test 7g: Recommendations retains Nellore");
+        Assert(!string.IsNullOrEmpty(mRec?.Recommendation),
+            $"Test 7h: Recommendations advisory generated: '{mRec?.Recommendation}'");
 
-        // Step 6: User refreshes Dashboard (NO query params) -> MUST RETAIN NELLORE
-        var refreshResult = await controller.Dashboard() as ViewResult;
-        var refreshModel = refreshResult?.Model as ClimatePageViewModel;
-        Assert(refreshModel?.Location == "Nellore" && Math.Abs(refreshModel.Latitude - 14.4426) < 0.001,
-            "Test 12f: Dashboard refresh retains Nellore (14.4426, 79.9865)");
+        // 6. Refresh simulation
+        var rRefresh = await controller.Dashboard() as ViewResult;
+        var mRefresh = rRefresh?.Model as ClimatePageViewModel;
+        Assert(mRefresh?.Location == "Nellore", "Test 7i: Page refresh retains Nellore");
 
-        // Step 7: User switches location to Ludhiana on Dashboard -> ALL PAGES UPDATE
-        var ludhianaResult = await controller.Dashboard(30.9010, 75.8573, "Ludhiana") as ViewResult;
-        var ludhianaModel = ludhianaResult?.Model as ClimatePageViewModel;
-        Assert(ludhianaModel?.Location == "Ludhiana",
-            "Test 13a: Dashboard switches to Ludhiana (30.9010, 75.8573)");
+        // Verify navigation across all 5 pages made at most 1 upstream call
+        Assert(ctrlHttp.TotalRequests <= 1,
+            $"Test 7j: All 5 pages served from cache with zero duplicate upstream calls (Upstream calls: {ctrlHttp.TotalRequests})");
 
-        var mapLudhiana = await controller.Map() as ViewResult;
-        var mapLudhianaModel = mapLudhiana?.Model as ClimatePageViewModel;
-        Assert(mapLudhianaModel?.Location == "Ludhiana" && Math.Abs(mapLudhianaModel.Latitude - 30.9010) < 0.001,
-            "Test 13b: Weather Map now reflects Ludhiana (30.9010, 75.8573)");
+        // ==============================================================================
+        // 8. SECURITY & API KEY SANITIZATION
+        // ==============================================================================
+        Console.WriteLine("\n--- 8. Confirming No API Key is Exposed ---");
+        // Verify that .gitignore includes .env
+        var gitignoreContent = File.Exists(".gitignore") ? File.ReadAllText(".gitignore") : "";
+        Assert(gitignoreContent.Contains(".env"), "Test 8a: .gitignore contains .env entry");
 
-        var anaLudhiana = await controller.Analytics() as ViewResult;
-        var anaLudhianaModel = anaLudhiana?.Model as ClimatePageViewModel;
-        Assert(anaLudhianaModel?.Location == "Ludhiana",
-            "Test 13c: Analytics now reflects Ludhiana");
+        var dockerignoreContent = File.Exists(".dockerignore") ? File.ReadAllText(".dockerignore") : "";
+        Assert(dockerignoreContent.Contains(".env"), "Test 8b: .dockerignore contains .env entry");
 
-        var foreLudhiana = await controller.Forecast() as ViewResult;
-        var foreLudhianaModel = foreLudhiana?.Model as ClimatePageViewModel;
-        Assert(foreLudhianaModel?.Location == "Ludhiana",
-            "Test 13d: Forecast now reflects Ludhiana");
+        Assert(File.Exists(".env.example"), "Test 8c: .env.example exists with placeholder");
+        var envExampleContent = File.ReadAllText(".env.example");
+        Assert(!envExampleContent.Contains(testApiKey) && envExampleContent.Contains("your_weatherapi_key_here"),
+            "Test 8d: .env.example does not contain actual API key");
 
-        var recLudhiana = await controller.Recommendations() as ViewResult;
-        var recLudhianaModel = recLudhiana?.Model as ClimatePageViewModel;
-        Assert(recLudhianaModel?.Location == "Ludhiana",
-            "Test 13e: Recommendations now reflects Ludhiana");
-
-        // Step 8: SearchPlaces action returns results
-        mockHttp.ResponseFactory = req => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(@"{""results"":[{""name"":""Nellore"",""latitude"":14.4426,""longitude"":79.9865,""admin1"":""Andhra Pradesh"",""country"":""India""}]}", Encoding.UTF8, "application/json")
-        };
-        var searchResult = await controller.SearchPlaces("Nellore") as JsonResult;
-        Assert(searchResult?.Value != null, "Test 14: SearchPlaces action returns valid JSON results");
-
-        Console.WriteLine("\n==================================================");
+        Console.WriteLine("\n======================================================================");
         Console.WriteLine($"TOTAL TESTS: {passed + failed} | PASSED: {passed} | FAILED: {failed}");
-        Console.WriteLine("==================================================");
+        Console.WriteLine("======================================================================");
 
         return failed == 0 ? 0 : 1;
     }

@@ -10,6 +10,10 @@ public class WeatherResponse
     [JsonPropertyName("current")] public CurrentWeather? Current { get; set; }
     [JsonPropertyName("hourly")] public HourlyWeather? Hourly { get; set; }
     [JsonPropertyName("daily")] public DailyWeather? Daily { get; set; }
+    [JsonPropertyName("fetched_at")] public DateTimeOffset FetchedAt { get; set; } = DateTimeOffset.UtcNow;
+    [JsonIgnore] public bool IsStale { get; set; } = false;
+    [JsonIgnore] public DateTimeOffset? LastUpdated { get; set; }
+    [JsonIgnore] public string? ConditionText { get; set; }
 }
 
 public class CurrentWeather
@@ -21,6 +25,7 @@ public class CurrentWeather
     [JsonPropertyName("precipitation")] public double Precipitation { get; set; }
     [JsonPropertyName("weather_code")] public int WeatherCode { get; set; }
     [JsonPropertyName("wind_speed_10m")] public double WindSpeed { get; set; }
+    [JsonPropertyName("condition_text")] public string ConditionText { get; set; } = "";
 }
 
 public class HourlyWeather
@@ -40,6 +45,7 @@ public class DailyWeather
     [JsonPropertyName("precipitation_sum")] public List<double> Rainfall { get; set; } = [];
     [JsonPropertyName("weather_code")] public List<int> WeatherCode { get; set; } = [];
     [JsonPropertyName("uv_index_max")] public List<double> UvIndex { get; set; } = [];
+    [JsonPropertyName("condition_text")] public List<string> ConditionText { get; set; } = [];
 }
 
 public class PlaceResult
@@ -47,6 +53,9 @@ public class PlaceResult
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("latitude")] public double Latitude { get; set; }
     [JsonPropertyName("longitude")] public double Longitude { get; set; }
+    [JsonPropertyName("lat")] public double Lat { set => Latitude = value; }
+    [JsonPropertyName("lon")] public double Lon { set => Longitude = value; }
+    [JsonPropertyName("region")] public string RegionAlt { set => Region = value; }
     [JsonPropertyName("admin1")] public string Region { get; set; } = "";
     [JsonPropertyName("country")] public string Country { get; set; } = "";
 }
@@ -81,6 +90,8 @@ public class ClimatePageViewModel
     public string WeatherDescription { get; set; } = "Unavailable";
     public string Recommendation { get; set; } = "";
     public string Error { get; set; } = "";
+    public bool IsStale { get; set; } = false;
+    public DateTimeOffset? LastUpdated { get; set; }
     public bool HasError => !string.IsNullOrEmpty(Error);
     public bool HasWeather => Weather?.Current != null;
 }

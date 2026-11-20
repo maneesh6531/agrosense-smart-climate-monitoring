@@ -30,7 +30,7 @@
             <a class="side-link @(ViewContext.RouteData.Values["action"]?.ToString() == "Recommendations" ? "active" : "")" asp-controller="Climate" asp-action="Recommendations" asp-route-latitude="@activeLat" asp-route-longitude="@activeLon" asp-route-location="@activeLoc"><span class="side-icon">✧</span> Recommendations</a>
         </nav>
         <div class="sidebar-bottom">
-            <div class="status-card"><span class="status-dot"></span><div><strong>Weather API</strong><small>Connected via Open-Meteo</small></div></div>
+            <div class="status-card"><span class="status-dot"></span><div><strong>Weather API</strong><small>Connected via WeatherAPI.com</small></div></div>
             <div class="sidebar-foot">Climate Monitoring System<br>Version 1.0</div>
         </div>
     </aside>
@@ -48,9 +48,18 @@
             </div>
         </header>
         <main class="page-content">
+            @if (Model is ClimatePageViewModel climateModel && climateModel.IsStale) {
+                <div class="alert alert-info d-flex align-items-center gap-3 mb-4 shadow-sm border-info" role="alert">
+                    <span class="fs-4">ℹ️</span>
+                    <div>
+                        <strong class="d-block">Cached Climate Data Active</strong>
+                        <span>The live weather service is temporarily rate-limited or unavailable (HTTP 429). Displaying the last recorded weather measurements for <strong>@climateModel.Location</strong> (Last updated: @(climateModel.LastUpdated?.ToLocalTime().ToString("g") ?? "Cached")). Live synchronization will resume automatically.</span>
+                    </div>
+                </div>
+            }
             @RenderBody()
         </main>
-        <footer class="footer">© @DateTime.Now.Year AgroSense · Smart Climate Monitoring for Agriculture · Weather data powered by Open-Meteo</footer>
+        <footer class="footer">© @DateTime.Now.Year AgroSense · Smart Climate Monitoring for Agriculture · Weather data powered by WeatherAPI.com</footer>
     </div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

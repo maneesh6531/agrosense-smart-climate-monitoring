@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using ClimateMonitoringSystem.Models;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace ClimateMonitoringSystem.Services;
@@ -26,23 +28,69 @@ public class WeatherService
 {
     private readonly HttpClient _http;
     private readonly IMemoryCache _cache;
+    private readonly IConfiguration _config;
     private readonly ILogger<WeatherService> _logger;
+    private readonly string _cacheDirectory;
+
+    // 1. Shared application-wide semaphore: serializes upstream requests
+    private static readonly SemaphoreSlim _apiSemaphore = new(1, 1);
+
+    // 2. Request Coalescing (Single-Flight): concurrent requests for identical coordinates share one in-flight Task
+    private static readonly ConcurrentDictionary<string, Task<WeatherResponse>> _inFlightForecasts = new();
+    private static readonly ConcurrentDictionary<string, Task<List<PlaceResult>>> _inFlightGeocoding = new();
+
+    // 3. Stale cache memory storage (persists beyond normal 15-minute cache expiration)
+    private static readonly ConcurrentDictionary<string, WeatherResponse> _staleCacheMemory = new();
+
+    // 4. Global cooldown after HTTP 429
+    private static DateTimeOffset _cooldownUntil = DateTimeOffset.MinValue;
+    private static string _cooldownMessage = "";
+    private static readonly object _cooldownLock = new();
 
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
     };
 
-    public WeatherService(HttpClient http, IMemoryCache cache, ILogger<WeatherService> logger)
+    public WeatherService(HttpClient http, IMemoryCache cache, IConfiguration config, ILogger<WeatherService> logger)
     {
         _http = http;
         _cache = cache;
+        _config = config;
         _logger = logger;
+
+        // Ensure disk cache directory exists for persistent stale-cache fallback
+        _cacheDirectory = Path.Combine(AppContext.BaseDirectory, "App_Data", "cache");
+        try
+        {
+            if (!Directory.Exists(_cacheDirectory))
+            {
+                Directory.CreateDirectory(_cacheDirectory);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not initialize disk cache directory {CacheDir}", _cacheDirectory);
+        }
     }
 
-    private static string GetWeatherCacheKey(double latitude, double longitude)
+    /// <summary>
+    /// Retrieves the WeatherAPI key from environment variables or configuration.
+    /// Never logs or hardcodes the key.
+    /// </summary>
+    public string? GetApiKey()
     {
-        // Round to 4 decimal places (~11 meters) for deterministic caching
+        var envKey = Environment.GetEnvironmentVariable("WEATHERAPI_KEY");
+        if (!string.IsNullOrWhiteSpace(envKey)) return envKey.Trim();
+
+        var cfgKey = _config["WEATHERAPI_KEY"] ?? _config["WEATHER_API_KEY"];
+        if (!string.IsNullOrWhiteSpace(cfgKey)) return cfgKey.Trim();
+
+        return null;
+    }
+
+    public static string GetWeatherCacheKey(double latitude, double longitude)
+    {
         var lat = Math.Round(latitude, 4).ToString("F4", CultureInfo.InvariantCulture);
         var lon = Math.Round(longitude, 4).ToString("F4", CultureInfo.InvariantCulture);
         return $"weather_{lat}_{lon}";
@@ -53,49 +101,372 @@ public class WeatherService
         return $"places_{name.Trim().ToLowerInvariant()}";
     }
 
+    public static bool IsCooldownActive(out string message)
+    {
+        lock (_cooldownLock)
+        {
+            if (DateTimeOffset.UtcNow < _cooldownUntil)
+            {
+                var remaining = (_cooldownUntil - DateTimeOffset.UtcNow).TotalSeconds;
+                message = string.IsNullOrEmpty(_cooldownMessage)
+                    ? $"The weather service rate limit has been reached (HTTP 429). Cooldown active for {Math.Ceiling(remaining)}s."
+                    : _cooldownMessage;
+                return true;
+            }
+
+            message = "";
+            return false;
+        }
+    }
+
+    public static void SetCooldown(TimeSpan? duration, string reason)
+    {
+        lock (_cooldownLock)
+        {
+            var cooldown = duration ?? TimeSpan.FromSeconds(60);
+            if (cooldown < TimeSpan.FromSeconds(30)) cooldown = TimeSpan.FromSeconds(30);
+            if (cooldown > TimeSpan.FromMinutes(15)) cooldown = TimeSpan.FromMinutes(15);
+
+            _cooldownUntil = DateTimeOffset.UtcNow.Add(cooldown);
+            _cooldownMessage = reason;
+        }
+    }
+
+    public static void ResetCooldownForTesting()
+    {
+        lock (_cooldownLock)
+        {
+            _cooldownUntil = DateTimeOffset.MinValue;
+            _cooldownMessage = "";
+        }
+    }
+
+    /// <summary>
+    /// Retrieves weather forecast using WeatherAPI.com as the primary provider.
+    /// Includes memory caching, request coalescing, global serialization, and stale-cache fallback.
+    /// </summary>
     public async Task<WeatherResponse> GetWeatherAsync(double latitude, double longitude)
     {
         var cacheKey = GetWeatherCacheKey(latitude, longitude);
 
-        // 1. Check in-memory cache (10 minutes retention)
+        // Tier 1: Check in-memory fresh cache (15 minutes retention)
         if (_cache.TryGetValue(cacheKey, out WeatherResponse? cachedResponse) && cachedResponse != null)
         {
-            _logger.LogInformation("Weather cache HIT for key: {CacheKey}", cacheKey);
+            _logger.LogInformation("Weather cache HIT (Memory) for key: {CacheKey}", cacheKey);
             return cachedResponse;
         }
 
-        // 2. Check if a recent global rate limit cooldown is active
-        if (_cache.TryGetValue("weather_ratelimit_cooldown", out string? rateLimitMsg))
-        {
-            throw new WeatherRateLimitException(rateLimitMsg ?? "Weather rate limit cooldown active. Please wait a moment.");
-        }
-
-        _logger.LogInformation("Weather cache MISS for key: {CacheKey}. Fetching from Open-Meteo...", cacheKey);
-
-        var lat = latitude.ToString(CultureInfo.InvariantCulture);
-        var lon = longitude.ToString(CultureInfo.InvariantCulture);
-
-        var url = "https://api.open-meteo.com/v1/forecast" +
-            $"?latitude={lat}&longitude={lon}" +
-            "&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m" +
-            "&hourly=temperature_2m,relative_humidity_2m,precipitation_probability,precipitation" +
-            "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code,uv_index_max" +
-            "&forecast_days=7&timezone=auto";
-
-        var responseJson = await ExecuteWithRetryAsync(url, "Weather Forecast");
-
-        var weatherData = JsonSerializer.Deserialize<WeatherResponse>(responseJson, _jsonOptions);
-        if (weatherData?.Current == null && weatherData?.Daily == null)
-        {
-            throw new WeatherServiceException("Weather service returned an incomplete response.");
-        }
-
-        // Cache successful response for 10 minutes
-        _cache.Set(cacheKey, weatherData, TimeSpan.FromMinutes(10));
-
-        return weatherData!;
+        // Tier 2: Request Coalescing (Single-Flight)
+        return await _inFlightForecasts.GetOrAdd(cacheKey, _ => FetchForecastWithConcurrencyLimiterAsync(latitude, longitude, cacheKey));
     }
 
+    private async Task<WeatherResponse> FetchForecastWithConcurrencyLimiterAsync(double latitude, double longitude, string cacheKey)
+    {
+        try
+        {
+            // Double-check cache in case another task populated it
+            if (_cache.TryGetValue(cacheKey, out WeatherResponse? cached) && cached != null)
+            {
+                return cached;
+            }
+
+            // Check if rate-limit cooldown is active
+            if (IsCooldownActive(out var cooldownMsg))
+            {
+                _logger.LogWarning("WeatherAPI cooldown active. Checking for stale cache fallback for {CacheKey}...", cacheKey);
+                var stale = TryGetStaleFallback(cacheKey);
+                if (stale != null)
+                {
+                    _logger.LogInformation("Serving stale cached weather during cooldown for {CacheKey}.", cacheKey);
+                    return stale;
+                }
+                throw new WeatherRateLimitException(cooldownMsg);
+            }
+
+            // Verify API key presence
+            var apiKey = GetApiKey();
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                _logger.LogWarning("WEATHERAPI_KEY is not configured. Attempting stale fallback for {CacheKey}...", cacheKey);
+                var stale = TryGetStaleFallback(cacheKey);
+                if (stale != null) return stale;
+
+                throw new WeatherServiceException(
+                    "WeatherAPI key is missing. Please set the WEATHERAPI_KEY environment variable in your .env file or Render dashboard.");
+            }
+
+            // Acquire concurrency limiter
+            _logger.LogInformation("Waiting for weather API semaphore for {CacheKey}...", cacheKey);
+            bool acquired = await _apiSemaphore.WaitAsync(TimeSpan.FromSeconds(20));
+            if (!acquired)
+            {
+                _logger.LogWarning("Weather semaphore queue timeout for {CacheKey}. Attempting stale fallback...", cacheKey);
+                var stale = TryGetStaleFallback(cacheKey);
+                if (stale != null) return stale;
+                throw new WeatherServiceException("Weather service queue is currently busy. Please try again shortly.");
+            }
+
+            try
+            {
+                // Double-check cache again after queueing
+                if (_cache.TryGetValue(cacheKey, out WeatherResponse? freshAfterWait) && freshAfterWait != null)
+                {
+                    return freshAfterWait;
+                }
+
+                _logger.LogInformation("Dispatching upstream WeatherAPI forecast request for {CacheKey}...", cacheKey);
+
+                var lat = latitude.ToString(CultureInfo.InvariantCulture);
+                var lon = longitude.ToString(CultureInfo.InvariantCulture);
+
+                // WeatherAPI forecast.json provides current weather + 3-day forecast in a single request
+                var url = $"https://api.weatherapi.com/v1/forecast.json?key={apiKey}&q={lat},{lon}&days=3&aqi=no&alerts=no";
+
+                using var response = await _http.GetAsync(url);
+                var responseContent = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    HandleApiErrorResponse(response.StatusCode, responseContent, response.Headers.RetryAfter);
+                }
+
+                var weatherData = ParseWeatherApiResponse(responseContent, latitude, longitude);
+
+                // Cache successful response in memory and persistent disk cache
+                CacheSuccessfulResponse(cacheKey, weatherData);
+
+                return weatherData;
+            }
+            finally
+            {
+                await Task.Delay(200);
+                _apiSemaphore.Release();
+            }
+        }
+        catch (WeatherRateLimitException)
+        {
+            var stale = TryGetStaleFallback(cacheKey);
+            if (stale != null)
+            {
+                _logger.LogWarning("Rate limit reached. Returning stale cache fallback for {CacheKey}.", cacheKey);
+                return stale;
+            }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var stale = TryGetStaleFallback(cacheKey);
+            if (stale != null)
+            {
+                _logger.LogWarning(ex, "Weather request failed. Returning stale cache fallback for {CacheKey}.", cacheKey);
+                return stale;
+            }
+            throw;
+        }
+        finally
+        {
+            _inFlightForecasts.TryRemove(cacheKey, out var _);
+        }
+    }
+
+    private void HandleApiErrorResponse(HttpStatusCode statusCode, string responseContent, System.Net.Http.Headers.RetryConditionHeaderValue? retryAfterHeader)
+    {
+        string? errorReason = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(responseContent);
+            if (doc.RootElement.TryGetProperty("error", out var err) && err.TryGetProperty("message", out var msg))
+            {
+                errorReason = msg.GetString();
+            }
+        }
+        catch { }
+
+        if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
+        {
+            var message = string.IsNullOrWhiteSpace(errorReason)
+                ? "Invalid or expired WeatherAPI key. Please verify WEATHERAPI_KEY in your .env or Render configuration."
+                : $"WeatherAPI Authentication Error: {errorReason}";
+
+            throw new WeatherServiceException(message);
+        }
+
+        if (statusCode == HttpStatusCode.TooManyRequests)
+        {
+            TimeSpan? retryAfter = null;
+            if (retryAfterHeader != null)
+            {
+                if (retryAfterHeader.Delta.HasValue) retryAfter = retryAfterHeader.Delta.Value;
+                else if (retryAfterHeader.Date.HasValue) retryAfter = retryAfterHeader.Date.Value - DateTimeOffset.UtcNow;
+            }
+
+            var cooldownTime = retryAfter ?? TimeSpan.FromSeconds(60);
+            var msg = string.IsNullOrWhiteSpace(errorReason)
+                ? "WeatherAPI rate limit reached (HTTP 429). The system is respecting cooldown."
+                : $"WeatherAPI Rate Limit: {errorReason}";
+
+            SetCooldown(cooldownTime, msg);
+            throw new WeatherRateLimitException(msg, retryAfter);
+        }
+
+        throw new WeatherServiceException(
+            $"WeatherAPI request failed (HTTP {(int)statusCode}): {(errorReason ?? "Unexpected response")}");
+    }
+
+    private WeatherResponse ParseWeatherApiResponse(string json, double latitude, double longitude)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var result = new WeatherResponse
+        {
+            Latitude = latitude,
+            Longitude = longitude,
+            Timezone = root.TryGetProperty("location", out var loc) && loc.TryGetProperty("tz_id", out var tz)
+                ? tz.GetString() ?? "auto"
+                : "auto",
+            FetchedAt = DateTimeOffset.UtcNow,
+            IsStale = false,
+            LastUpdated = DateTimeOffset.UtcNow
+        };
+
+        if (root.TryGetProperty("current", out var cur))
+        {
+            var condCode = cur.TryGetProperty("condition", out var cond) && cond.TryGetProperty("code", out var code)
+                ? code.GetInt32()
+                : 1000;
+            var condText = cond.TryGetProperty("text", out var text) ? text.GetString() ?? "" : "";
+
+            result.ConditionText = condText;
+            result.Current = new CurrentWeather
+            {
+                Time = cur.TryGetProperty("last_updated", out var lu) ? lu.GetString() ?? "" : "",
+                Temperature = cur.TryGetProperty("temp_c", out var t) ? t.GetDouble() : 0.0,
+                Humidity = cur.TryGetProperty("humidity", out var h) ? h.GetDouble() : 0.0,
+                FeelsLike = cur.TryGetProperty("feelslike_c", out var fl) ? fl.GetDouble() : 0.0,
+                Precipitation = cur.TryGetProperty("precip_mm", out var p) ? p.GetDouble() : 0.0,
+                WindSpeed = cur.TryGetProperty("wind_kph", out var w) ? w.GetDouble() : 0.0,
+                WeatherCode = MapWeatherApiCodeToWmo(condCode),
+                ConditionText = condText
+            };
+        }
+
+        result.Hourly = new HourlyWeather();
+        result.Daily = new DailyWeather();
+
+        if (root.TryGetProperty("forecast", out var forecast) && forecast.TryGetProperty("forecastday", out var days))
+        {
+            foreach (var dayItem in days.EnumerateArray())
+            {
+                result.Daily.Time.Add(dayItem.TryGetProperty("date", out var d) ? d.GetString() ?? "" : "");
+
+                if (dayItem.TryGetProperty("day", out var dayObj))
+                {
+                    result.Daily.MaxTemperature.Add(dayObj.TryGetProperty("maxtemp_c", out var maxT) ? maxT.GetDouble() : 0.0);
+                    result.Daily.MinTemperature.Add(dayObj.TryGetProperty("mintemp_c", out var minT) ? minT.GetDouble() : 0.0);
+                    result.Daily.Rainfall.Add(dayObj.TryGetProperty("totalprecip_mm", out var rain) ? rain.GetDouble() : 0.0);
+                    result.Daily.UvIndex.Add(dayObj.TryGetProperty("uv", out var uv) ? uv.GetDouble() : 5.0);
+
+                    var dayCondCode = dayObj.TryGetProperty("condition", out var dayCond) && dayCond.TryGetProperty("code", out var cCode)
+                        ? cCode.GetInt32()
+                        : 1000;
+                    var dayCondText = dayCond.TryGetProperty("text", out var cText) ? cText.GetString() ?? "" : "";
+
+                    result.Daily.WeatherCode.Add(MapWeatherApiCodeToWmo(dayCondCode));
+                    result.Daily.ConditionText.Add(dayCondText);
+                }
+
+                // Extract next 24 hourly data points from the forecast days
+                if (result.Hourly.Time.Count < 24 && dayItem.TryGetProperty("hour", out var hours))
+                {
+                    foreach (var h in hours.EnumerateArray())
+                    {
+                        if (result.Hourly.Time.Count >= 24) break;
+                        result.Hourly.Time.Add(h.TryGetProperty("time", out var ht) ? ht.GetString() ?? "" : "");
+                        result.Hourly.Temperature.Add(h.TryGetProperty("temp_c", out var hTemp) ? hTemp.GetDouble() : 0.0);
+                        result.Hourly.Humidity.Add(h.TryGetProperty("humidity", out var hHum) ? hHum.GetDouble() : 0.0);
+                        result.Hourly.RainProbability.Add(h.TryGetProperty("chance_of_rain", out var hRainProb) ? hRainProb.GetDouble() : 0.0);
+                        result.Hourly.Precipitation.Add(h.TryGetProperty("precip_mm", out var hPrecip) ? hPrecip.GetDouble() : 0.0);
+                    }
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private void CacheSuccessfulResponse(string cacheKey, WeatherResponse data)
+    {
+        _cache.Set(cacheKey, data, TimeSpan.FromMinutes(15));
+        _staleCacheMemory[cacheKey] = data;
+
+        try
+        {
+            var filePath = Path.Combine(_cacheDirectory, $"{cacheKey}.json");
+            var json = JsonSerializer.Serialize(data, _jsonOptions);
+            File.WriteAllText(filePath, json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not persist weather cache to disk for {CacheKey}", cacheKey);
+        }
+    }
+
+    public WeatherResponse? TryGetStaleFallback(string cacheKey)
+    {
+        if (_staleCacheMemory.TryGetValue(cacheKey, out var memStale) && memStale != null)
+        {
+            var clone = CloneResponse(memStale);
+            clone.IsStale = true;
+            clone.LastUpdated = memStale.FetchedAt;
+            return clone;
+        }
+
+        try
+        {
+            var filePath = Path.Combine(_cacheDirectory, $"{cacheKey}.json");
+            if (File.Exists(filePath))
+            {
+                var json = File.ReadAllText(filePath);
+                var diskData = JsonSerializer.Deserialize<WeatherResponse>(json, _jsonOptions);
+                if (diskData?.Current != null)
+                {
+                    diskData.IsStale = true;
+                    var fileInfo = new FileInfo(filePath);
+                    diskData.LastUpdated = fileInfo.LastWriteTimeUtc;
+                    _staleCacheMemory[cacheKey] = diskData;
+                    return diskData;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed reading disk cache for {CacheKey}", cacheKey);
+        }
+
+        return null;
+    }
+
+    private static WeatherResponse CloneResponse(WeatherResponse src)
+    {
+        return new WeatherResponse
+        {
+            Latitude = src.Latitude,
+            Longitude = src.Longitude,
+            Timezone = src.Timezone,
+            Current = src.Current,
+            Hourly = src.Hourly,
+            Daily = src.Daily,
+            FetchedAt = src.FetchedAt,
+            IsStale = true,
+            LastUpdated = src.LastUpdated ?? src.FetchedAt,
+            ConditionText = src.ConditionText
+        };
+    }
+
+    /// <summary>
+    /// Searches places with city autocomplete using WeatherAPI.com search.json.
+    /// </summary>
     public async Task<List<PlaceResult>> SearchPlacesAsync(string name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -109,158 +480,89 @@ public class WeatherService
             return cachedPlaces;
         }
 
-        var url = $"https://geocoding-api.open-meteo.com/v1/search?name={Uri.EscapeDataString(name.Trim())}&count=8&language=en&format=json";
-
-        try
+        // 2. Deduplicate identical simultaneous searches
+        return await _inFlightGeocoding.GetOrAdd(cacheKey, async _ =>
         {
-            var responseJson = await ExecuteWithRetryAsync(url, "Geocoding Search", maxRetries: 1);
-            var results = JsonSerializer.Deserialize<GeocodingResponse>(responseJson, _jsonOptions)?.Results ?? [];
-
-            // Cache geocoding results for 24 hours
-            _cache.Set(cacheKey, results, TimeSpan.FromHours(24));
-            return results;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Geocoding search failed for '{Name}'", name);
-            return [];
-        }
-    }
-
-    private async Task<string> ExecuteWithRetryAsync(string url, string operationName, int maxRetries = 2)
-    {
-        int attempt = 0;
-        int delayMs = 1000;
-
-        while (true)
-        {
-            attempt++;
             try
             {
+                if (_cache.TryGetValue(cacheKey, out List<PlaceResult>? fresh) && fresh != null)
+                {
+                    return fresh;
+                }
+
+                var apiKey = GetApiKey();
+                if (string.IsNullOrWhiteSpace(apiKey))
+                {
+                    _logger.LogWarning("WEATHERAPI_KEY not configured for search autocomplete.");
+                    return [];
+                }
+
+                var url = $"https://api.weatherapi.com/v1/search.json?key={apiKey}&q={Uri.EscapeDataString(name.Trim())}";
                 using var response = await _http.GetAsync(url);
-
-                if (response.IsSuccessStatusCode)
+                if (!response.IsSuccessStatusCode)
                 {
-                    return await response.Content.ReadAsStringAsync();
+                    return [];
                 }
 
-                var statusCode = response.StatusCode;
-                var errorBody = await response.Content.ReadAsStringAsync();
+                var responseJson = await response.Content.ReadAsStringAsync();
+                var results = JsonSerializer.Deserialize<List<PlaceResult>>(responseJson, _jsonOptions) ?? [];
 
-                // Check for 429 Too Many Requests
-                if (statusCode == HttpStatusCode.TooManyRequests)
+                if (results.Count > 0)
                 {
-                    _logger.LogWarning("{Operation} HTTP 429 on attempt {Attempt}/{MaxAttempts}", operationName, attempt, maxRetries + 1);
-
-                    TimeSpan? retryAfter = null;
-                    if (response.Headers.RetryAfter != null)
-                    {
-                        if (response.Headers.RetryAfter.Delta.HasValue)
-                            retryAfter = response.Headers.RetryAfter.Delta.Value;
-                        else if (response.Headers.RetryAfter.Date.HasValue)
-                            retryAfter = response.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
-                    }
-
-                    // If max retries reached or Retry-After is too long (> 10s), stop and set cooldown
-                    if (attempt > maxRetries || (retryAfter.HasValue && retryAfter.Value.TotalSeconds > 10))
-                    {
-                        var cooldown = retryAfter ?? TimeSpan.FromSeconds(20);
-                        if (cooldown > TimeSpan.FromMinutes(1)) cooldown = TimeSpan.FromMinutes(1);
-                        var msg = "The live weather service rate limit has been reached (HTTP 429). Live weather data is temporarily unavailable. Please wait a moment before refreshing.";
-
-                        _cache.Set("weather_ratelimit_cooldown", msg, cooldown);
-                        throw new WeatherRateLimitException(msg, retryAfter);
-                    }
-
-                    // Exponential backoff or Retry-After delay
-                    var waitDuration = retryAfter ?? TimeSpan.FromMilliseconds(delayMs);
-                    if (waitDuration < TimeSpan.FromMilliseconds(500)) waitDuration = TimeSpan.FromMilliseconds(500);
-                    if (waitDuration > TimeSpan.FromSeconds(8)) waitDuration = TimeSpan.FromSeconds(8);
-
-                    await Task.Delay(waitDuration);
-                    delayMs *= 2;
-                    continue;
+                    _cache.Set(cacheKey, results, TimeSpan.FromHours(24));
                 }
-
-                // Check for 5xx Server Errors (transient)
-                if ((int)statusCode >= 500 && (int)statusCode <= 599)
-                {
-                    _logger.LogWarning("{Operation} HTTP {StatusCode} on attempt {Attempt}/{MaxAttempts}", operationName, (int)statusCode, attempt, maxRetries + 1);
-
-                    if (attempt > maxRetries)
-                    {
-                        throw new WeatherServiceException($"The Open-Meteo weather service is temporarily unavailable (HTTP {(int)statusCode}). Please try again later.");
-                    }
-
-                    await Task.Delay(delayMs);
-                    delayMs *= 2;
-                    continue;
-                }
-
-                // 4xx Client Errors (400, 404, etc.) - do not retry
-                string errorReason = ExtractReasonFromJson(errorBody) ?? $"HTTP {(int)statusCode} ({statusCode})";
-                throw new WeatherServiceException($"Weather service request failed: {errorReason}");
-            }
-            catch (TaskCanceledException ex) when (!ex.CancellationToken.IsCancellationRequested)
-            {
-                _logger.LogWarning(ex, "{Operation} timed out on attempt {Attempt}/{MaxAttempts}", operationName, attempt, maxRetries + 1);
-                if (attempt > maxRetries)
-                {
-                    throw new WeatherServiceException("The request to the weather service timed out. Please try again.");
-                }
-                await Task.Delay(delayMs);
-                delayMs *= 2;
-            }
-            catch (HttpRequestException ex) when (attempt <= maxRetries)
-            {
-                _logger.LogWarning(ex, "{Operation} network error on attempt {Attempt}/{MaxAttempts}", operationName, attempt, maxRetries + 1);
-                await Task.Delay(delayMs);
-                delayMs *= 2;
-            }
-            catch (WeatherServiceException)
-            {
-                throw;
+                return results;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "{Operation} unexpected error on attempt {Attempt}", operationName, attempt);
-                throw new WeatherServiceException("An error occurred while connecting to the weather service: " + ex.Message, ex);
+                _logger.LogWarning(ex, "SearchPlaces failed for '{Name}'", name);
+                return [];
             }
-        }
-    }
-
-    private static string? ExtractReasonFromJson(string json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return null;
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("reason", out var reasonProp))
+            finally
             {
-                return reasonProp.GetString();
+                _inFlightGeocoding.TryRemove(cacheKey, out var _);
             }
-        }
-        catch { }
-        return null;
+        });
     }
 
-    public static string DescribeWeather(int code) => code switch
+    public static int MapWeatherApiCodeToWmo(int weatherApiCode) => weatherApiCode switch
     {
-        0 => "Clear sky",
-        1 => "Mainly clear",
-        2 => "Partly cloudy",
-        3 => "Overcast",
-        45 or 48 => "Fog",
-        51 or 53 or 55 => "Drizzle",
-        56 or 57 => "Freezing drizzle",
-        61 or 63 or 65 => "Rain",
-        66 or 67 => "Freezing rain",
-        71 or 73 or 75 or 77 => "Snow",
-        80 or 81 or 82 => "Rain showers",
-        85 or 86 => "Snow showers",
-        95 or 96 or 99 => "Thunderstorm",
-        _ => "Unknown"
+        1000 => 0, // Sunny / Clear
+        1003 => 2, // Partly cloudy
+        1006 or 1009 => 3, // Overcast
+        1030 or 1135 or 1147 => 45, // Fog / Mist
+        1063 or 1150 or 1153 or 1180 or 1183 => 61, // Light rain
+        1186 or 1189 => 63, // Moderate rain
+        1192 or 1195 or 1240 or 1243 or 1246 => 65, // Heavy rain
+        1066 or 1114 or 1210 or 1213 or 1216 or 1219 or 1222 or 1225 => 71, // Snow
+        1069 or 1198 or 1201 or 1204 or 1207 => 66, // Freezing rain / Sleet
+        1087 or 1273 or 1276 or 1279 or 1282 => 95, // Thunderstorm
+        _ => 1
     };
+
+    public static string DescribeWeather(int code, string? conditionText = null)
+    {
+        if (!string.IsNullOrWhiteSpace(conditionText))
+            return conditionText;
+
+        return code switch
+        {
+            0 => "Clear sky",
+            1 => "Mainly clear",
+            2 => "Partly cloudy",
+            3 => "Overcast",
+            45 or 48 => "Fog",
+            51 or 53 or 55 => "Drizzle",
+            56 or 57 => "Freezing drizzle",
+            61 or 63 or 65 => "Rain",
+            66 or 67 => "Freezing rain",
+            71 or 73 or 75 or 77 => "Snow",
+            80 or 81 or 82 => "Rain showers",
+            85 or 86 => "Snow showers",
+            95 or 96 or 99 => "Thunderstorm",
+            _ => "Unknown"
+        };
+    }
 
     public static string MakeRecommendation(CurrentWeather? c)
     {

@@ -2,6 +2,9 @@ using ClimateMonitoringSystem.Services;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 
+// Load environment variables from local .env file if present (for local development)
+LoadDotEnvFile();
+
 // Check if running in automated verification test mode
 if (args.Contains("--test"))
 {
@@ -79,3 +82,39 @@ app.MapControllerRoute(
     pattern: "{controller=Climate}/{action=Dashboard}/{id?}");
 
 app.Run();
+
+static void LoadDotEnvFile()
+{
+    var candidatePaths = new[]
+    {
+        Path.Combine(Directory.GetCurrentDirectory(), ".env"),
+        Path.Combine(AppContext.BaseDirectory, ".env")
+    };
+
+    foreach (var filePath in candidatePaths)
+    {
+        if (File.Exists(filePath))
+        {
+            try
+            {
+                foreach (var line in File.ReadAllLines(filePath))
+                {
+                    var trimmed = line.Trim();
+                    if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#')) continue;
+                    var eqIdx = trimmed.IndexOf('=');
+                    if (eqIdx > 0)
+                    {
+                        var key = trimmed.Substring(0, eqIdx).Trim();
+                        var val = trimmed.Substring(eqIdx + 1).Trim().Trim('"', '\'');
+                        if (!string.IsNullOrEmpty(key) && string.IsNullOrEmpty(Environment.GetEnvironmentVariable(key)))
+                        {
+                            Environment.SetEnvironmentVariable(key, val);
+                        }
+                    }
+                }
+            }
+            catch { }
+            break;
+        }
+    }
+}
