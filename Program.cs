@@ -23,3 +23,10 @@ app.MapControllerRoute(
     pattern: "{controller=Climate}/{action=Dashboard}/{id?}");
 
 app.Run();
+builder.Services.AddControllersWithViews();
+builder.Services.AddMemoryCache();
+
+builder.Services.AddHttpClient<WeatherService>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
