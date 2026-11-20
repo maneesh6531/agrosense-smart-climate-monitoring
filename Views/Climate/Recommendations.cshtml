@@ -1,0 +1,15 @@
+@model ClimatePageViewModel
+@{ ViewData["Title"] = "Recommendations"; var c=Model.Weather.Current; }
+<div class="mb-4"><div class="eyebrow">DECISION SUPPORT</div><h1 class="page-title">Smart Farming Recommendations</h1><p class="muted">Weather-based suggestions to support irrigation and field management.</p></div>
+@if (!string.IsNullOrEmpty(Model.Error)) { <div class="alert alert-warning">@Model.Error</div> }
+@if (c != null) {
+<div class="content-card recommendation-hero mb-3"><div class="recommendation-icon">🌱</div><div><span class="tag">CURRENT ADVISORY · @Model.Location</span><h4 class="mt-2">Recommended action</h4><p class="mb-0">@Model.Recommendation</p></div></div>
+<div class="row g-3">
+ <div class="col-md-6"><div class="content-card h-100"><h5>💧 Irrigation planning</h5><ul><li>Use measured soil moisture and crop growth stage before deciding irrigation.</li><li>Consider forecast rainfall to avoid unnecessary watering.</li><li>Prefer cooler periods such as early morning for irrigation where suitable.</li><li>Check water availability and local irrigation practices.</li></ul></div></div>
+ <div class="col-md-6"><div class="content-card h-100"><h5>🌡️ Temperature management</h5><ul><li>Monitor crops during high-temperature periods.</li><li>Look for visible heat stress and wilting.</li><li>Use locally recommended shade or protective measures for sensitive crops.</li><li>Compare forecast maximum and minimum temperatures before field operations.</li></ul></div></div>
+ <div class="col-md-6"><div class="content-card h-100"><h5>🌧️ Rain and spraying</h5><ul><li>Review rain probability before fertilizer or pesticide application.</li><li>Avoid spraying during rain or strong winds.</li><li>Follow product labels and local agricultural guidance.</li></ul></div></div>
+ <div class="col-md-6"><div class="content-card h-100"><h5>📡 Sensor integration status</h5><p>Live weather data is provided by Open-Meteo. Soil moisture, soil pH and on-field humidity require dedicated sensors or manual observations.</p><span class="tag">WEATHER API CONNECTED</span> <span class="tag">SOIL SENSOR NOT CONNECTED</span></div></div>
+</div>
+<div class="content-card mt-3"><h5>Current weather indicators</h5><div class="row g-3"><div class="col-6 col-md-3"><div class="metric-label">Temperature</div><strong>@c.Temperature°C</strong></div><div class="col-6 col-md-3"><div class="metric-label">Humidity</div><strong>@c.Humidity%</strong></div><div class="col-6 col-md-3"><div class="metric-label">Precipitation</div><strong>@c.Precipitation mm</strong></div><div class="col-6 col-md-3"><div class="metric-label">Wind speed</div><strong>@c.WindSpeed km/h</strong></div></div></div>
+}
+<div class="small muted mt-3">These are general decision-support suggestions, not a substitute for soil measurements, crop-specific advice, or an agricultural expert.</div>

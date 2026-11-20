@@ -1,0 +1,37 @@
+@model ClimatePageViewModel
+@{ ViewData["Title"] = "Analytics"; var h=Model.Weather.Hourly; var d=Model.Weather.Daily; }
+<div class="mb-4"><div class="eyebrow">DATA INSIGHTS</div><h1 class="page-title">Climate Analytics</h1><p class="muted">Visual analysis of hourly and daily weather indicators for @Model.Location.</p></div>
+@if (!string.IsNullOrEmpty(Model.Error)) { <div class="alert alert-warning">@Model.Error</div> }
+@if (Model.Weather.Current != null && h != null && d != null) {
+<div class="row g-3 mb-3">
+ <div class="col-md-3"><div class="metric-card"><div class="metric-label">Current temperature</div><div class="metric-value">@Model.Weather.Current.Temperature.ToString("0.0")<span>°C</span></div></div></div>
+ <div class="col-md-3"><div class="metric-card"><div class="metric-label">Current humidity</div><div class="metric-value">@Model.Weather.Current.Humidity<span>%</span></div></div></div>
+ <div class="col-md-3"><div class="metric-card"><div class="metric-label">7-day rainfall</div><div class="metric-value">@d.Rainfall.Sum().ToString("0.0")<span> mm</span></div></div></div>
+ <div class="col-md-3"><div class="metric-card"><div class="metric-label">7-day temperature range</div><div class="metric-value">@d.MinTemperature.Min().ToString("0")–@d.MaxTemperature.Max().ToString("0")<span>°C</span></div></div></div>
+</div>
+<div class="row g-3">
+ <div class="col-lg-6"><div class="content-card"><h5>7-day temperature range</h5><p class="muted">Daily minimum and maximum temperatures</p><canvas id="tempChart"></canvas></div></div>
+ <div class="col-lg-6"><div class="content-card"><h5>Daily rainfall</h5><p class="muted">Precipitation total per day</p><canvas id="rainChart"></canvas></div></div>
+ <div class="col-lg-6"><div class="content-card"><h5>Hourly humidity</h5><p class="muted">Next 24-hour relative humidity</p><canvas id="humidityChart"></canvas></div></div>
+ <div class="col-lg-6"><div class="content-card"><h5>Rain probability</h5><p class="muted">Next 24-hour precipitation probability</p><canvas id="probChart"></canvas></div></div>
+</div>
+<div class="content-card mt-3"><h5>Analytics interpretation</h5><ul class="mb-0"><li>Highest forecast temperature: <strong>@d.MaxTemperature.Max().ToString("0.0")°C</strong></li><li>Lowest forecast temperature: <strong>@d.MinTemperature.Min().ToString("0.0")°C</strong></li><li>Total forecast rainfall: <strong>@d.Rainfall.Sum().ToString("0.0") mm</strong></li><li>Average next-24-hour humidity: <strong>@h.Humidity.Take(24).DefaultIfEmpty().Average().ToString("0.0")%</strong></li></ul></div>
+}
+@section Scripts {
+@if (h != null && d != null) {
+<script>
+const days=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.Time));
+const maxT=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.MaxTemperature));
+const minT=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.MinTemperature));
+const rain=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.Rainfall));
+const hours=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(h.Time.Take(24).Select(x=>x.Length>13?x.Substring(11,5):x)));
+const humidity=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(h.Humidity.Take(24)));
+const probability=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(h.RainProbability.Take(24)));
+const common={responsive:true,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:true,grid:{color:'#edf1ee'}},x:{grid:{display:false}}}};
+new Chart(document.getElementById('tempChart'),{type:'line',data:{labels:days,datasets:[{label:'Maximum °C',data:maxT,borderColor:'#e58b3b',tension:.3},{label:'Minimum °C',data:minT,borderColor:'#23845b',tension:.3}]},options:common});
+new Chart(document.getElementById('rainChart'),{type:'bar',data:{labels:days,datasets:[{label:'Rainfall mm',data:rain,backgroundColor:'#65a9d6',borderRadius:6}]},options:common});
+new Chart(document.getElementById('humidityChart'),{type:'line',data:{labels:hours,datasets:[{label:'Humidity %',data:humidity,borderColor:'#528ac4',backgroundColor:'rgba(82,138,196,.12)',fill:true,tension:.3}]},options:common});
+new Chart(document.getElementById('probChart'),{type:'bar',data:{labels:hours,datasets:[{label:'Rain probability %',data:probability,backgroundColor:'#8bb7d7',borderRadius:5}]},options:common});
+</script>
+}
+}

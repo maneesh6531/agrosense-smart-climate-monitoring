@@ -1,0 +1,23 @@
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build files
+bin/
+obj/
+
+# Temporary files
+*.log
+*.tmp
+
+# IDE files
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Sensitive configuration
+appsettings.Development.json
