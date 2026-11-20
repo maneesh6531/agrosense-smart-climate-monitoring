@@ -21,3 +21,5 @@ Thumbs.db
 
 # Sensitive configuration
 appsettings.Development.json
+Dockerfile.local
+.dockerignore
