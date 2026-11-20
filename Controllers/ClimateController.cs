@@ -7,63 +7,128 @@ namespace ClimateMonitoringSystem.Controllers;
 public class ClimateController : Controller
 {
     private readonly WeatherService _weather;
-    public ClimateController(WeatherService weather) => _weather = weather;
+    private readonly IUserLocationService _locationService;
+    private readonly ILogger<ClimateController> _logger;
 
-    private async Task<ClimatePageViewModel> BuildModel(double lat, double lon, string location)
+    public ClimateController(WeatherService weather, IUserLocationService locationService, ILogger<ClimateController> logger)
     {
-        var data = await _weather.GetWeatherAsync(lat, lon);
-        return new ClimatePageViewModel
-        {
-            Location = location,
-            Latitude = lat,
-            Longitude = lon,
-            Weather = data,
-            WeatherDescription = WeatherService.DescribeWeather(data.Current?.WeatherCode ?? -1),
-            Recommendation = WeatherService.MakeRecommendation(data.Current)
-        };
+        _weather = weather;
+        _locationService = locationService;
+        _logger = logger;
     }
 
-    public async Task<IActionResult> Dashboard(double latitude = 31.2240, double longitude = 75.7690, string location = "Jalandhar")
+    private async Task<ClimatePageViewModel> BuildModelAsync(LocationSelection loc)
     {
-        try { return View(await BuildModel(latitude, longitude, location)); }
+        try
+        {
+            var data = await _weather.GetWeatherAsync(loc.Latitude, loc.Longitude);
+            return new ClimatePageViewModel
+            {
+                Location = loc.Location,
+                Latitude = loc.Latitude,
+                Longitude = loc.Longitude,
+                Weather = data,
+                WeatherDescription = WeatherService.DescribeWeather(data.Current?.WeatherCode ?? -1),
+                Recommendation = WeatherService.MakeRecommendation(data.Current)
+            };
+        }
+        catch (WeatherRateLimitException ex)
+        {
+            _logger.LogWarning("Rate limit reached for {Location}: {Message}", loc.Location, ex.Message);
+            return new ClimatePageViewModel
+            {
+                Location = loc.Location,
+                Latitude = loc.Latitude,
+                Longitude = loc.Longitude,
+                Error = ex.Message
+            };
+        }
+        catch (WeatherServiceException ex)
+        {
+            _logger.LogWarning("Weather service error for {Location}: {Message}", loc.Location, ex.Message);
+            return new ClimatePageViewModel
+            {
+                Location = loc.Location,
+                Latitude = loc.Latitude,
+                Longitude = loc.Longitude,
+                Error = ex.Message
+            };
+        }
         catch (Exception ex)
         {
-            return View(new ClimatePageViewModel { Location = location, Latitude = latitude, Longitude = longitude, Error = "Unable to load live weather. Check your internet connection and try again. " + ex.Message });
+            _logger.LogError(ex, "Unexpected error loading weather for {Location}", loc.Location);
+            return new ClimatePageViewModel
+            {
+                Location = loc.Location,
+                Latitude = loc.Latitude,
+                Longitude = loc.Longitude,
+                Error = "Unable to load live weather at this time. " + ex.Message
+            };
         }
     }
 
-    public async Task<IActionResult> Map(double latitude = 31.2240, double longitude = 75.7690, string location = "Jalandhar")
+    [HttpGet]
+    public async Task<IActionResult> Dashboard(double? latitude = null, double? longitude = null, string? location = null)
     {
-        try { return View(await BuildModel(latitude, longitude, location)); }
-        catch (Exception ex) { return View(new ClimatePageViewModel { Location = location, Latitude = latitude, Longitude = longitude, Error = "Weather data unavailable: " + ex.Message }); }
+        var loc = _locationService.ResolveLocation(HttpContext, latitude, longitude, location);
+        var model = await BuildModelAsync(loc);
+        return View(model);
     }
 
-    public async Task<IActionResult> Analytics(double latitude = 31.2240, double longitude = 75.7690, string location = "Jalandhar")
+    [HttpGet]
+    public async Task<IActionResult> Map(double? latitude = null, double? longitude = null, string? location = null)
     {
-        try { return View(await BuildModel(latitude, longitude, location)); }
-        catch (Exception ex) { return View(new ClimatePageViewModel { Location = location, Latitude = latitude, Longitude = longitude, Error = "Analytics data unavailable: " + ex.Message }); }
+        var loc = _locationService.ResolveLocation(HttpContext, latitude, longitude, location);
+        var model = await BuildModelAsync(loc);
+        return View(model);
     }
 
-    public async Task<IActionResult> Forecast(double latitude = 31.2240, double longitude = 75.7690, string location = "Jalandhar")
+    [HttpGet]
+    public async Task<IActionResult> Analytics(double? latitude = null, double? longitude = null, string? location = null)
     {
-        try { return View(await BuildModel(latitude, longitude, location)); }
-        catch (Exception ex) { return View(new ClimatePageViewModel { Location = location, Latitude = latitude, Longitude = longitude, Error = "Forecast unavailable: " + ex.Message }); }
+        var loc = _locationService.ResolveLocation(HttpContext, latitude, longitude, location);
+        var model = await BuildModelAsync(loc);
+        return View(model);
     }
 
-    public async Task<IActionResult> Recommendations(double latitude = 31.2240, double longitude = 75.7690, string location = "Jalandhar")
+    [HttpGet]
+    public async Task<IActionResult> Forecast(double? latitude = null, double? longitude = null, string? location = null)
     {
-        try { return View(await BuildModel(latitude, longitude, location)); }
-        catch (Exception ex) { return View(new ClimatePageViewModel { Location = location, Latitude = latitude, Longitude = longitude, Error = "Recommendations unavailable: " + ex.Message }); }
+        var loc = _locationService.ResolveLocation(HttpContext, latitude, longitude, location);
+        var model = await BuildModelAsync(loc);
+        return View(model);
+    }
+
+    [HttpGet]
+    public async Task<IActionResult> Recommendations(double? latitude = null, double? longitude = null, string? location = null)
+    {
+        var loc = _locationService.ResolveLocation(HttpContext, latitude, longitude, location);
+        var model = await BuildModelAsync(loc);
+        return View(model);
     }
 
     [HttpGet]
     public async Task<IActionResult> SearchPlaces(string q)
     {
+        if (string.IsNullOrWhiteSpace(q) || q.Trim().Length < 2)
+            return Json(Array.Empty<object>());
+
         try
         {
             var places = await _weather.SearchPlacesAsync(q);
-            return Json(places.Select(p => new { name = p.Name, region = p.Region, country = p.Country, latitude = p.Latitude, longitude = p.Longitude }));
+            return Json(places.Select(p => new
+            {
+                name = p.Name,
+                region = p.Region,
+                country = p.Country,
+                latitude = p.Latitude,
+                longitude = p.Longitude
+            }));
         }
-        catch { return Json(Array.Empty<object>()); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SearchPlaces failed for query {Query}", q);
+            return Json(Array.Empty<object>());
+        }
     }
 }

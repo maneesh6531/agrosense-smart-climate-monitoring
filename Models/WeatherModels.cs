@@ -56,6 +56,22 @@ public class GeocodingResponse
     [JsonPropertyName("results")] public List<PlaceResult> Results { get; set; } = [];
 }
 
+public class LocationSelection
+{
+    public string Location { get; set; } = "Jalandhar";
+    public double Latitude { get; set; } = 31.2240;
+    public double Longitude { get; set; } = 75.7690;
+
+    public LocationSelection() { }
+
+    public LocationSelection(string location, double latitude, double longitude)
+    {
+        Location = location;
+        Latitude = latitude;
+        Longitude = longitude;
+    }
+}
+
 public class ClimatePageViewModel
 {
     public string Location { get; set; } = "Jalandhar";
@@ -65,4 +81,6 @@ public class ClimatePageViewModel
     public string WeatherDescription { get; set; } = "Unavailable";
     public string Recommendation { get; set; } = "";
     public string Error { get; set; } = "";
+    public bool HasError => !string.IsNullOrEmpty(Error);
+    public bool HasWeather => Weather?.Current != null;
 }

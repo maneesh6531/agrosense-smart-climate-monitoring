@@ -1,49 +1,164 @@
 @model ClimatePageViewModel
 @{
     ViewData["Title"] = "Dashboard";
-    var c = Model.Weather.Current;
+    var c = Model.Weather?.Current;
+    var latStr = Model.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    var lonStr = Model.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture);
 }
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
  <div><div class="eyebrow">SMART AGRICULTURE PLATFORM</div><h1 class="page-title">Climate Dashboard</h1><p class="muted mb-0">Real-time environmental conditions for informed farm decisions.</p></div>
  <span class="live-pill">● LIVE WEATHER</span>
 </div>
-<form method="get" asp-action="Dashboard" class="search-panel mb-4">
+
+<form method="get" asp-action="Dashboard" id="weatherSearchForm" class="search-panel mb-4">
  <div class="row g-2 align-items-end">
-  <div class="col-md-5"><label class="form-label">Search location</label><input id="placeSearch" class="form-control" placeholder="Enter city, e.g. Ludhiana" autocomplete="off"><div id="placeResults" class="search-results"></div></div>
-  <input type="hidden" name="latitude" id="lat" value="@Model.Latitude"><input type="hidden" name="longitude" id="lon" value="@Model.Longitude"><input type="hidden" name="location" id="loc" value="@Model.Location">
-  <div class="col-md-2"><button class="btn btn-green w-100" type="submit">Load Weather</button></div>
-  <div class="col-md-5 text-md-end small muted">Selected location: <strong>@Model.Location</strong></div>
+  <div class="col-md-5 position-relative">
+    <label class="form-label fw-semibold" for="placeSearch">Search location</label>
+    <input id="placeSearch" class="form-control" placeholder="Enter city, e.g. Nellore, Ludhiana..." autocomplete="off">
+    <div id="placeResults" class="search-results"></div>
+  </div>
+  <input type="hidden" name="latitude" id="lat" value="@latStr">
+  <input type="hidden" name="longitude" id="lon" value="@lonStr">
+  <input type="hidden" name="location" id="loc" value="@Model.Location">
+  <div class="col-md-2">
+    <button class="btn btn-green w-100" type="submit" id="btnLoadWeather">Load Weather</button>
+  </div>
+  <div class="col-md-5 text-md-end small muted">
+    Selected location: <strong class="text-dark">@Model.Location</strong>
+    <span class="d-block text-secondary">(@Model.Latitude.ToString("0.0000"), @Model.Longitude.ToString("0.0000"))</span>
+  </div>
  </div>
 </form>
-@if (!string.IsNullOrEmpty(Model.Error)) { <div class="alert alert-warning">@Model.Error</div> }
+
+@if (!string.IsNullOrEmpty(Model.Error)) {
+  <div class="alert alert-warning d-flex align-items-center gap-2 mb-4" role="alert">
+    <span class="fs-5">⚠️</span>
+    <div>@Model.Error</div>
+  </div>
+}
+
 @if (c != null) {
 <div class="hero-weather mb-4">
  <div><div class="eyebrow text-white-50">CURRENT CONDITIONS · @Model.Location</div><div class="hero-temp">@c.Temperature.ToString("0.0")°<span>C</span></div><div class="fs-5">@Model.WeatherDescription</div><div class="text-white-50 mt-2">Feels like @c.FeelsLike.ToString("0.0")°C · Updated @c.Time</div></div>
  <div class="hero-icon">🌤️</div>
 </div>
 <div class="row g-3 mb-4">
- <div class="col-6 col-xl-3"><div class="metric-card"><div class="metric-label">Humidity</div><div class="metric-value">@c.Humidity<span>%</span></div><div class="metric-foot">Relative humidity</div></div></div>
+ <div class="col-6 col-xl-3"><div class="metric-card"><div class="metric-label">Humidity</div><div class="metric-value">@c.Humidity.ToString("0")<span>%</span></div><div class="metric-foot">Relative humidity</div></div></div>
  <div class="col-6 col-xl-3"><div class="metric-card"><div class="metric-label">Precipitation</div><div class="metric-value">@c.Precipitation.ToString("0.0")<span> mm</span></div><div class="metric-foot">Current precipitation</div></div></div>
  <div class="col-6 col-xl-3"><div class="metric-card"><div class="metric-label">Wind speed</div><div class="metric-value">@c.WindSpeed.ToString("0.0")<span> km/h</span></div><div class="metric-foot">At 10 metres</div></div></div>
  <div class="col-6 col-xl-3"><div class="metric-card"><div class="metric-label">Weather code</div><div class="metric-value">@c.WeatherCode</div><div class="metric-foot">@Model.WeatherDescription</div></div></div>
 </div>
 <div class="row g-3">
  <div class="col-lg-8"><div class="content-card h-100"><div class="section-heading"><div><h5>Next 24 hours</h5><p class="muted">Temperature trend</p></div><span class="tag">HOURLY</span></div><canvas id="dashboardChart" height="105"></canvas></div></div>
- <div class="col-lg-4"><div class="content-card h-100"><div class="section-heading"><div><h5>Farm advisory</h5><p class="muted">Weather-based guidance</p></div><span>🌿</span></div><p>@Model.Recommendation</p><a asp-action="Recommendations" class="text-green fw-semibold">View recommendations →</a></div></div>
+ <div class="col-lg-4"><div class="content-card h-100"><div class="section-heading"><div><h5>Farm advisory</h5><p class="muted">Weather-based guidance</p></div><span>🌿</span></div><p>@Model.Recommendation</p><a asp-action="Recommendations" asp-route-latitude="@latStr" asp-route-longitude="@lonStr" asp-route-location="@Model.Location" class="text-green fw-semibold">View recommendations →</a></div></div>
 </div>
 <div class="small muted mt-3">Source: Open-Meteo. Weather values describe the selected coordinates and are not direct measurements from farm sensors.</div>
+} else if (string.IsNullOrEmpty(Model.Error)) {
+<div class="content-card text-center py-5">
+  <div class="fs-1 mb-2">📡</div>
+  <h5>No Weather Data Available</h5>
+  <p class="muted mb-0">Live weather metrics could not be loaded for @Model.Location. Please click "Load Weather" to try again.</p>
+</div>
 }
+
 @section Scripts {
 <script>
-const input=document.getElementById('placeSearch'), results=document.getElementById('placeResults');
+const input = document.getElementById('placeSearch');
+const results = document.getElementById('placeResults');
+const form = document.getElementById('weatherSearchForm');
 let debounce;
-input?.addEventListener('input',()=>{clearTimeout(debounce);const q=input.value.trim();if(q.length<2){results.innerHTML='';return;}debounce=setTimeout(async()=>{try{const r=await fetch('/Climate/SearchPlaces?q='+encodeURIComponent(q));const places=await r.json();results.innerHTML=places.map(p=>`<button type="button" class="search-result" data-lat="${p.latitude}" data-lon="${p.longitude}" data-name="${p.name}, ${p.region}, ${p.country}">${p.name}, ${p.region} · ${p.country}</button>`).join('');}catch{results.innerHTML='';}},350);});
-results?.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;document.getElementById('lat').value=b.dataset.lat;document.getElementById('lon').value=b.dataset.lon;document.getElementById('loc').value=b.dataset.name;input.value=b.dataset.name;results.innerHTML='';});
-@if (c != null && Model.Weather.Hourly != null) {
+let currentPlaces = [];
+
+input?.addEventListener('input', () => {
+    clearTimeout(debounce);
+    const q = input.value.trim();
+    if (q.length < 2) {
+        results.innerHTML = '';
+        currentPlaces = [];
+        return;
+    }
+    debounce = setTimeout(async () => {
+        try {
+            const r = await fetch('/Climate/SearchPlaces?q=' + encodeURIComponent(q));
+            currentPlaces = await r.json();
+            if (currentPlaces.length === 0) {
+                results.innerHTML = '<div class="p-3 text-muted small">No locations found.</div>';
+                return;
+            }
+            results.innerHTML = currentPlaces.map((p, idx) =>
+                `<button type="button" class="search-result" data-index="${idx}" data-lat="${p.latitude}" data-lon="${p.longitude}" data-name="${p.name}, ${p.region}, ${p.country}"><strong>${p.name}</strong>, <span class="text-muted">${p.region} · ${p.country}</span></button>`
+            ).join('');
+        } catch {
+            results.innerHTML = '';
+            currentPlaces = [];
+        }
+    }, 300);
+});
+
+results?.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    selectPlace(b.dataset.lat, b.dataset.lon, b.dataset.name);
+});
+
+function selectPlace(lat, lon, name) {
+    document.getElementById('lat').value = lat;
+    document.getElementById('lon').value = lon;
+    document.getElementById('loc').value = name;
+    if (input) input.value = name;
+    if (results) results.innerHTML = '';
+}
+
+// Close dropdown on click outside
+document.addEventListener('click', e => {
+    if (!e.target.closest('.search-panel')) {
+        if (results) results.innerHTML = '';
+    }
+});
+
+// Auto-select first result if user hits Enter while dropdown is open
+input?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+        if (currentPlaces && currentPlaces.length > 0) {
+            e.preventDefault();
+            const first = currentPlaces[0];
+            const fullName = `${first.name}, ${first.region}, ${first.country}`;
+            selectPlace(first.latitude, first.longitude, fullName);
+            form.submit();
+        }
+    }
+});
+
+@if (c != null && Model.Weather?.Hourly != null && Model.Weather.Hourly.Time.Count > 0) {
 <text>
-const times=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.Weather.Hourly.Time.Take(24).Select(x=>x.Length>10?x.Substring(11):x)));
-const temps=@Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.Weather.Hourly.Temperature.Take(24)));
-new Chart(document.getElementById('dashboardChart'),{type:'line',data:{labels:times,datasets:[{label:'Temperature °C',data:temps,borderColor:'#23845b',backgroundColor:'rgba(35,132,91,.12)',fill:true,tension:.35,pointRadius:2}]},options:{plugins:{legend:{display:false}},scales:{y:{grid:{color:'#edf1ee'}},x:{grid:{display:false}}}}});
+const times = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.Weather.Hourly.Time.Take(24).Select(x => x.Length > 10 ? x.Substring(11) : x)));
+const temps = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.Weather.Hourly.Temperature.Take(24)));
+const chartEl = document.getElementById('dashboardChart');
+if (chartEl) {
+    new Chart(chartEl, {
+        type: 'line',
+        data: {
+            labels: times,
+            datasets: [{
+                label: 'Temperature °C',
+                data: temps,
+                borderColor: '#23845b',
+                backgroundColor: 'rgba(35,132,91,.12)',
+                fill: true,
+                tension: .35,
+                pointRadius: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: {
+                y: { grid: { color: '#edf1ee' } },
+                x: { grid: { display: false } }
+            }
+        }
+    });
+}
 </text>
 }
 </script>

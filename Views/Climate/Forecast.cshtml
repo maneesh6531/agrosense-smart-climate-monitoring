@@ -1,19 +1,43 @@
 @model ClimatePageViewModel
-@{ ViewData["Title"] = "Forecast"; var d=Model.Weather.Daily; }
+@{
+    ViewData["Title"] = "Forecast";
+    var d = Model.Weather?.Daily;
+    var hasDaily = d != null && d.Time.Count > 0;
+}
 <div class="mb-4"><div class="eyebrow">UPCOMING CONDITIONS</div><h1 class="page-title">7-Day Forecast</h1><p class="muted">Weather outlook for @Model.Location to support short-term farm planning.</p></div>
-@if (!string.IsNullOrEmpty(Model.Error)) { <div class="alert alert-warning">@Model.Error</div> }
-@if (d != null) {
+@if (!string.IsNullOrEmpty(Model.Error)) {
+  <div class="alert alert-warning d-flex align-items-center gap-2 mb-4">
+    <span>⚠️</span><div>@Model.Error</div>
+  </div>
+}
+@if (hasDaily) {
 <div class="row g-3 mb-4">
- @for (int i=0;i<d.Time.Count;i++) {
- <div class="col-12 col-sm-6 col-lg-4 col-xl-3"><div class="forecast-card"><div class="d-flex justify-content-between"><strong>@(DateTime.TryParse(d.Time[i],out var date)?date.ToString("ddd, dd MMM"):d.Time[i])</strong><span class="tag">DAY @(i+1)</span></div><div class="forecast-icon">@(d.WeatherCode.ElementAtOrDefault(i) is 0 or 1 ? "☀️" : d.WeatherCode.ElementAtOrDefault(i) is 2 or 3 ? "☁️" : "🌦️")</div><div class="forecast-temp">@d.MaxTemperature.ElementAtOrDefault(i).ToString("0")° <span>/ @d.MinTemperature.ElementAtOrDefault(i).ToString("0")°</span></div><div class="muted small">@ClimateMonitoringSystem.Services.WeatherService.DescribeWeather(d.WeatherCode.ElementAtOrDefault(i))</div><hr><div class="d-flex justify-content-between small"><span>Rainfall</span><strong>@d.Rainfall.ElementAtOrDefault(i).ToString("0.0") mm</strong></div><div class="d-flex justify-content-between small mt-2"><span>UV index max</span><strong>@d.UvIndex.ElementAtOrDefault(i).ToString("0.0")</strong></div></div></div>
+ @for (int i = 0; i < d!.Time.Count; i++) {
+ <div class="col-12 col-sm-6 col-lg-4 col-xl-3"><div class="forecast-card"><div class="d-flex justify-content-between"><strong>@(DateTime.TryParse(d.Time[i], out var date) ? date.ToString("ddd, dd MMM") : d.Time[i])</strong><span class="tag">DAY @(i + 1)</span></div><div class="forecast-icon">@(d.WeatherCode.ElementAtOrDefault(i) is 0 or 1 ? "☀️" : d.WeatherCode.ElementAtOrDefault(i) is 2 or 3 ? "☁️" : "🌦️")</div><div class="forecast-temp">@d.MaxTemperature.ElementAtOrDefault(i).ToString("0")° <span>/ @d.MinTemperature.ElementAtOrDefault(i).ToString("0")°</span></div><div class="muted small">@ClimateMonitoringSystem.Services.WeatherService.DescribeWeather(d.WeatherCode.ElementAtOrDefault(i))</div><hr><div class="d-flex justify-content-between small"><span>Rainfall</span><strong>@d.Rainfall.ElementAtOrDefault(i).ToString("0.0") mm</strong></div><div class="d-flex justify-content-between small mt-2"><span>UV index max</span><strong>@d.UvIndex.ElementAtOrDefault(i).ToString("0.0")</strong></div></div></div>
  }
 </div>
 <div class="content-card"><h5>Forecast temperature trend</h5><canvas id="forecastChart" height="90"></canvas></div>
+} else if (string.IsNullOrEmpty(Model.Error)) {
+<div class="content-card text-center py-5">
+  <div class="fs-1 mb-2">📅</div>
+  <h5>Forecast Unavailable</h5>
+  <p class="muted mb-0">The 7-day forecast could not be loaded for @Model.Location.</p>
+</div>
 }
 @section Scripts {
-@if (d != null) {
+@if (hasDaily) {
 <script>
-new Chart(document.getElementById('forecastChart'),{type:'line',data:{labels:@Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.Time)),datasets:[{label:'Maximum °C',data:@Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.MaxTemperature)),borderColor:'#e58b3b',tension:.3},{label:'Minimum °C',data:@Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.MinTemperature)),borderColor:'#23845b',tension:.3}]},options:{responsive:true,plugins:{legend:{position:'bottom'}}}});
+new Chart(document.getElementById('forecastChart'), {
+    type: 'line',
+    data: {
+        labels: @Html.Raw(System.Text.Json.JsonSerializer.Serialize(d!.Time)),
+        datasets: [
+            { label: 'Maximum °C', data: @Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.MaxTemperature)), borderColor: '#e58b3b', tension: .3 },
+            { label: 'Minimum °C', data: @Html.Raw(System.Text.Json.JsonSerializer.Serialize(d.MinTemperature)), borderColor: '#23845b', tension: .3 }
+        ]
+    },
+    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+});
 </script>
 }
 }
